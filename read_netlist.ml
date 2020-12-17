@@ -147,11 +147,10 @@ type expr = E_Plus of expr * expr
           | E_Range of expr * expr * expr
           | E_Index of expr * expr
           | E_Concat of expr list
-          | E_Nul (*FIXME: delme; used only in single-bit IO Ranges*)
 
 type portmap = Portmap of string * expr
 
-type ioreg_decl = IOReg of expr * expr * string list
+type ioreg_decl = Range of expr * expr * string list | Single of string list
 
 type module_ent = Wire   of ioreg_decl
                 | Reg    of ioreg_decl
@@ -259,8 +258,8 @@ let parse_ioreg_decl tkns = match tkns with
                                      let _,  rst = expect Tk_Colon rst     in
                                      let e2, rst = parse_expr rst          in
                                      let _,  rst = expect Tk_RBracket rst  in
-                                     let il, rst = parse_ident_list [] rst in IOReg (e1, e2, il), rst
-    | ((Tk_Ident _,_)::rst) as i  -> let il, rst = parse_ident_list [] i   in IOReg (E_Nul , E_Nul, il), rst
+                                     let il, rst = parse_ident_list [] rst in Range (e1, e2, il), rst
+    | ((Tk_Ident _,_)::rst) as i  -> let il, rst = parse_ident_list [] i   in Single il, rst
     | e -> raise (NoParse (parse_error "wire/reg/input/output decl" e))
 
 
