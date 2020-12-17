@@ -130,10 +130,11 @@ type expr = E_Plus of expr * expr
           | E_Literal of string
           | E_Range of expr * expr * expr
           | E_Index of expr * expr
+          | E_Nul (*FIXME: delme; used only in single-bit IO Ranges*)
 
 type portmap = Portmap of string * string (* should be of string*exp really *)
 
-type ioreg_decl = IOReg of int * int * string list
+type ioreg_decl = IOReg of expr * expr * string list
 
 type module_ent = Wire   of ioreg_decl
                 | Reg    of ioreg_decl
@@ -218,12 +219,16 @@ let rec parse_ident_list acc = function
        | (Tk_Ident i,_)::(Tk_Comma,_)::rst -> parse_ident_list (i::acc) rst 
        | e -> raise (NoParse (parse_error "identifier" e))
 
-let parse_ioreg_decl = function
-  | (Tk_LBracket,_)::(Tk_Literal hi,_)::(Tk_Colon,_)::(Tk_Literal lo,_)::(Tk_RBracket,_)::rst
-   -> let ilist,rst = parse_ident_list [] rst in (IOReg (int_of_string hi,int_of_string lo,ilist),rst)
-  | ((Tk_Ident _,_) :: rst) as i
-   -> let ilist,rst = parse_ident_list [] i in (IOReg (0,0,ilist),rst)
-  | e -> raise (NoParse (parse_error "wire/reg/input/output decl" e))
+let parse_ioreg_decl tkns = match tkns with
+    | ((Tk_LBracket,_)::rst) as i -> let _,  rst = expect Tk_LBracket i    in
+                                     let e1, rst = parse_term rst          in
+                                     let _,  rst = expect Tk_Colon rst     in
+                                     let e2, rst = parse_term rst          in
+                                     let _,  rst = expect Tk_RBracket rst  in
+                                     let il, rst = parse_ident_list [] rst in IOReg (e1, e2, il), rst
+    | ((Tk_Ident _,_)::rst) as i  -> let il, rst = parse_ident_list [] i   in IOReg (E_Nul , E_Nul, il), rst
+    | e -> raise (NoParse (parse_error "wire/reg/input/output decl" e))
+
 
 let rec parse_mod_ent_lst acc = function
   | (Tk_Kw_wire,_)   :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Wire   ioreg::acc) rst
