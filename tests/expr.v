@@ -1,1 +1,1 @@
-var_a + 3*var_b[idx+1]
+var_a + var_b + 3*var_c[idx+1]

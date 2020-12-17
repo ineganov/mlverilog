@@ -132,7 +132,7 @@ type expr = E_Plus of expr * expr
           | E_Index of expr * expr
           | E_Nul (*FIXME: delme; used only in single-bit IO Ranges*)
 
-type portmap = Portmap of string * string (* should be of string*exp really *)
+type portmap = Portmap of string * expr
 
 type ioreg_decl = IOReg of expr * expr * string list
 
@@ -163,8 +163,8 @@ let parse_var_or_lit = function
     | e -> raise (NoParse (parse_error "literal or identifier" e))
 
 let rec parse_idx_or_range expr tkns = let _,  rst = expect Tk_LBracket tkns in
-                                   let e1, rst = parse_term rst in match rst with 
-                            | (Tk_Colon,_)::rst -> let e2, rst = parse_term rst in 
+                                   let e1, rst = parse_expr rst in match rst with 
+                            | (Tk_Colon,_)::rst -> let e2, rst = parse_expr rst in 
                                                    let _,  rst = expect Tk_RBracket rst in
                                                    E_Range (expr,e1,e2), rst
                             | (Tk_RBracket,_)::rst  -> E_Index (expr,e1), rst
@@ -179,16 +179,16 @@ and parse_factor tkns = let f1, rst1 = parse_indexable tkns in match rst1 with
          | (Tk_Op_Mul,_)::rst1 -> let f2, rst = parse_factor rst1 in E_Mul (f1, f2), rst
          | _ -> f1, rst1
 
-and parse_term tkns = let t1, rst1 = parse_factor tkns in match rst1 with
-         | (Tk_Op_Plus,_)::rst1 -> let t2, rst = parse_term rst1 in E_Plus (t1, t2), rst
+and parse_expr tkns = let t1, rst1 = parse_factor tkns in match rst1 with
+         | (Tk_Op_Plus,_)::rst1 -> let t2, rst = parse_expr rst1 in E_Plus (t1, t2), rst
          | _ -> t1, rst1
 
 
-
-let parse_conn = function
-    | (Tk_Dot,_)::(Tk_Ident p,_)::(Tk_LParen,_)::(Tk_Ident c,_)::(Tk_RParen,_)::rst
-    -> (Portmap (p,c), rst)
-    | e -> raise (NoParse (parse_error "port connection" e))
+let parse_conn tkns = let _,rst = expect Tk_Dot tkns   in
+                      let p,rst = ident rst            in
+                      let _,rst = expect Tk_LParen rst in
+                      let e,rst = parse_expr rst       in
+                      let _,rst = expect Tk_RParen rst in Portmap (p,e), rst
 
 let rec parse_conn_list acc tkn = 
     let c,rst = parse_conn tkn in match rst with
@@ -221,9 +221,9 @@ let rec parse_ident_list acc = function
 
 let parse_ioreg_decl tkns = match tkns with
     | ((Tk_LBracket,_)::rst) as i -> let _,  rst = expect Tk_LBracket i    in
-                                     let e1, rst = parse_term rst          in
+                                     let e1, rst = parse_expr rst          in
                                      let _,  rst = expect Tk_Colon rst     in
-                                     let e2, rst = parse_term rst          in
+                                     let e2, rst = parse_expr rst          in
                                      let _,  rst = expect Tk_RBracket rst  in
                                      let il, rst = parse_ident_list [] rst in IOReg (e1, e2, il), rst
     | ((Tk_Ident _,_)::rst) as i  -> let il, rst = parse_ident_list [] i   in IOReg (E_Nul , E_Nul, il), rst
