@@ -60,6 +60,15 @@ let read_string_lit file =
     with End_of_file -> raise (UnexpectedEOF "Unexpected EOF while looking for closing quote")
        | Done        -> !str
 
+let take_until cond file = 
+    let str = ref "" in
+    try while true do match input_char file with
+     |  a when cond a -> raise Done
+     |  a             -> str := !str ^ (smake 1 a)
+    done; !str
+    with End_of_file -> raise (UnexpectedEOF "Unexpected EOF while taking escaped string or comment")
+       | Done -> !str
+
 let eat_space file = try while true do match input_char file with
                      | ' ' -> ()
                      | _   -> unread file ; raise Done
@@ -97,6 +106,8 @@ let tokenize fname =
                        in tk_list := (Tk_BaseOct l,   !line_num) :: !tk_list
         | '\'', 'b' -> let l = read_based_lit bin_set in_f
                        in tk_list := (Tk_BaseBin l,   !line_num) :: !tk_list
+        | '/' , '/' -> let _ = take_until (function '\n' -> true | _ -> false) in_f 
+                       in line_num := !line_num + 1
         | '\n', _ -> unread in_f ; line_num := !line_num + 1
         | ' ' , _ -> unread in_f
         | '(' , _ -> unread in_f ; tk_list := (Tk_LParen,   !line_num) :: !tk_list
@@ -112,11 +123,15 @@ let tokenize fname =
         | ',' , _ -> unread in_f ; tk_list := (Tk_Comma,    !line_num) :: !tk_list
         | '*' , _ -> unread in_f ; tk_list := (Tk_Op_Mul,   !line_num) :: !tk_list
         | '+' , _ -> unread in_f ; tk_list := (Tk_Op_Plus,  !line_num) :: !tk_list
+        | '\\', _ -> unread in_f ; unread in_f ;
+                                let s = take_until (function ' ' -> true | _ -> false) in_f
+                                in tk_list := (Tk_Ident s, !line_num) :: !tk_list
         |  a  , _ when dec_set a -> unread in_f ; unread in_f ;
-                                   let s = read_based_lit dec_set in_f
-                                   in tk_list := (Tk_Literal s, !line_num) :: !tk_list
-        | '"' , _ -> unread in_f ; let s = read_string_lit in_f 
-                                   in tk_list := (Tk_String s, !line_num) :: !tk_list
+                                let s = read_based_lit dec_set in_f
+                                in tk_list := (Tk_Literal s, !line_num) :: !tk_list
+        | '"' , _ -> unread in_f ; 
+                                let s = read_string_lit in_f 
+                                in tk_list := (Tk_String s, !line_num) :: !tk_list
         |  a  , _ when is_alpha a -> unread in_f; unread in_f ;
                                 let s = take_while is_alphanum in_f
                                 in  tk_list := (kw_maybe s, !line_num) :: !tk_list
