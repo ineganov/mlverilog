@@ -9,6 +9,6 @@ module Blah(a,b,c);
                          .y(b) ) ;
 
     pqpq # (.QWE(RTY)) instance_name2 ( .x(a),
-                         .y(b) ) ;
+                         .y({a,b,3+2}) ) ;
 
 endmodule

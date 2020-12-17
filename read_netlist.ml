@@ -146,6 +146,7 @@ type expr = E_Plus of expr * expr
           | E_Based of int * string
           | E_Range of expr * expr * expr
           | E_Index of expr * expr
+          | E_Concat of expr list
           | E_Nul (*FIXME: delme; used only in single-bit IO Ranges*)
 
 type portmap = Portmap of string * expr
@@ -173,6 +174,11 @@ let ident = function
     | (Tk_Ident s,_)::rst -> s, rst
     | e -> raise (NoParse (parse_error "identifier" e))
 
+let rec parse_delimited acc parser delim tkns =
+    let item, rst = parser tkns in match rst with
+    | (d,_)::rst when d == delim -> parse_delimited (item::acc) parser delim rst
+    | _ -> lrev (item::acc),rst 
+
 let parse_var_or_lit = function
     | (Tk_Ident s,_)::rst -> E_Variable s, rst
     | (Tk_Literal s,_)::(Tk_BaseHex l,_)::rst -> E_Based (int_of_string s, "h"^l), rst
@@ -195,7 +201,15 @@ and parse_indexable tkns = let v_or_l, rst = parse_var_or_lit tkns in
                          | ((Tk_LBracket,_)::rst) as r -> parse_idx_or_range v_or_l r
                          | _ -> v_or_l, rst
 
-and parse_factor tkns = let f1, rst1 = parse_indexable tkns in match rst1 with
+and parse_concat tkns = let _, rst = expect Tk_LBrace tkns in
+                        let e_lst, rst = parse_delimited [] parse_expr Tk_Comma rst in
+                        let _, rst = expect Tk_RBrace rst in
+                        E_Concat e_lst, rst
+
+and parse_concat_or_idxbl = function ((Tk_LBrace,_)::rst) as i -> parse_concat i
+                                    | tkns -> parse_indexable tkns
+
+and parse_factor tkns = let f1, rst1 = parse_concat_or_idxbl tkns in match rst1 with
          | (Tk_Op_Mul,_)::rst1 -> let f2, rst = parse_factor rst1 in E_Mul (f1, f2), rst
          | _ -> f1, rst1
 
