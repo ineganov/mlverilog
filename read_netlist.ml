@@ -143,6 +143,7 @@ type expr = E_Plus of expr * expr
           | E_Mul of expr * expr
           | E_Variable of string
           | E_Literal of string
+          | E_Based of int * string
           | E_Range of expr * expr * expr
           | E_Index of expr * expr
           | E_Nul (*FIXME: delme; used only in single-bit IO Ranges*)
@@ -174,6 +175,10 @@ let ident = function
 
 let parse_var_or_lit = function
     | (Tk_Ident s,_)::rst -> E_Variable s, rst
+    | (Tk_Literal s,_)::(Tk_BaseHex l,_)::rst -> E_Based (int_of_string s, "h"^l), rst
+    | (Tk_Literal s,_)::(Tk_BaseDec l,_)::rst -> E_Based (int_of_string s, "d"^l), rst
+    | (Tk_Literal s,_)::(Tk_BaseOct l,_)::rst -> E_Based (int_of_string s, "o"^l), rst
+    | (Tk_Literal s,_)::(Tk_BaseBin l,_)::rst -> E_Based (int_of_string s, "b"^l), rst
     | (Tk_Literal s,_)::rst -> E_Literal s, rst
     | e -> raise (NoParse (parse_error "literal or identifier" e))
 
