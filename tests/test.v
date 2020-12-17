@@ -11,4 +11,7 @@ module Blah(a,b,c);
     pqpq # (.QWE(RTY)) instance_name2 ( .x(a),
                          .y({a,b,3+2}) ) ;
 
+    assign a = b;
+    assign {q,w,e} = 4+1;
+
 endmodule

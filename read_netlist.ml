@@ -8,7 +8,7 @@ let snd = function (_, b) -> b
 
 type token = Tk_LParen  | Tk_RParen   | Tk_LBrace  | Tk_RBrace  | Tk_LBracket | Tk_RBracket
            | Tk_Semi    | Tk_Colon    | Tk_Comma   | Tk_Hash    | Tk_Dot
-           | Tk_Op_Plus | Tk_Op_Minus | Tk_Op_Mul  | Tk_Op_Div
+           | Tk_Op_Plus | Tk_Op_Minus | Tk_Op_Mul  | Tk_Op_Div  | Tk_Op_Equal
            | Tk_BaseHex of string | Tk_BaseDec of string | Tk_BaseOct of string | Tk_BaseBin of string
            | Tk_Ident   of string | Tk_Literal of string | Tk_String of string
            | Tk_Kw_module | Tk_Kw_endmodule | Tk_Kw_reg   | Tk_Kw_wire
@@ -121,6 +121,7 @@ let tokenize fname =
         | '.' , _ -> unread in_f ; tk_list := (Tk_Dot,      !line_num) :: !tk_list
         | '#' , _ -> unread in_f ; tk_list := (Tk_Hash,     !line_num) :: !tk_list
         | ',' , _ -> unread in_f ; tk_list := (Tk_Comma,    !line_num) :: !tk_list
+        | '=' , _ -> unread in_f ; tk_list := (Tk_Op_Equal, !line_num) :: !tk_list
         | '*' , _ -> unread in_f ; tk_list := (Tk_Op_Mul,   !line_num) :: !tk_list
         | '+' , _ -> unread in_f ; tk_list := (Tk_Op_Plus,  !line_num) :: !tk_list
         | '\\', _ -> unread in_f ; unread in_f ;
@@ -158,6 +159,7 @@ type module_ent = Wire   of ioreg_decl
                 | Output of ioreg_decl
                 | Inout  of ioreg_decl
                 | Inst of string * string * portmap list * portmap list
+                | Assign of expr * expr
 
 type module_def = Module of string * string list * module_ent list
 
@@ -262,6 +264,10 @@ let parse_ioreg_decl tkns = match tkns with
     | ((Tk_Ident _,_)::rst) as i  -> let il, rst = parse_ident_list [] i   in Single il, rst
     | e -> raise (NoParse (parse_error "wire/reg/input/output decl" e))
 
+let parse_assignment tkns = let lvalue, rst = parse_concat_or_idxbl tkns in
+                            let _,      rst = expect Tk_Op_Equal rst     in
+                            let expr,   rst = parse_expr rst             in
+                            let _,      rst = expect Tk_Semi rst         in Assign (lvalue, expr), rst
 
 let rec parse_mod_ent_lst acc = function
   | (Tk_Kw_wire,_)   :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Wire   ioreg::acc) rst
@@ -269,6 +275,7 @@ let rec parse_mod_ent_lst acc = function
   | (Tk_Kw_input,_)  :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Input  ioreg::acc) rst
   | (Tk_Kw_output,_) :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Output ioreg::acc) rst
   | (Tk_Kw_inout,_)  :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Inout  ioreg::acc) rst
+  | (Tk_Kw_assign,_) :: rst -> let assgn,rst = parse_assignment rst in parse_mod_ent_lst (assgn::acc) rst
   | (Tk_Ident _,_) as i :: rst -> let m,rst = parse_module_inst (i::rst) in parse_mod_ent_lst (m::acc) rst
   | (Tk_Kw_endmodule,_) :: rst -> lrev acc, rst
   | e -> raise (NoParse (parse_error "module entity or endmodule" e))
