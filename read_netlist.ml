@@ -2,6 +2,8 @@ let sprintf = Printf.sprintf
 let lcase   = Char.lowercase_ascii
 let smake   = String.make
 let lrev    = List.rev
+let lmap    = List.map
+let hd      = List.hd
 
 let fst = function (a, _) -> a
 let snd = function (_, b) -> b
@@ -10,7 +12,7 @@ type token = Tk_LParen  | Tk_RParen   | Tk_LBrace  | Tk_RBrace  | Tk_LBracket | 
            | Tk_Semi    | Tk_Colon    | Tk_Comma   | Tk_Hash    | Tk_Dot      | Tk_At
            | Tk_Op_Plus | Tk_Op_Minus | Tk_Op_Mul  | Tk_Op_Div  | Tk_Op_Equal
            | Tk_BaseHex of string | Tk_BaseDec of string | Tk_BaseOct of string | Tk_BaseBin of string
-           | Tk_Ident   of string | Tk_Literal of string | Tk_String of string
+           | Tk_Ident   of string | Tk_Literal of string | Tk_String of string | Tk_Builtin of string
            | Tk_Kw_module | Tk_Kw_endmodule | Tk_Kw_reg   | Tk_Kw_wire | Tk_Kw_posedge | Tk_Kw_negedge
            | Tk_Kw_assign | Tk_Kw_output    | Tk_Kw_input | Tk_Kw_inout | Tk_Kw_if | Tk_Kw_else
            | Tk_Kw_begin  | Tk_Kw_end | Tk_Kw_fork | Tk_Kw_join | Tk_Kw_always | Tk_Kw_initial
@@ -21,6 +23,7 @@ exception UnexpectedWTF  of string
 exception Done
 exception NoParse of string
 exception UnexpectedToken of token * string
+exception NoEval of string
 
 let kw_maybe = function "module"    -> Tk_Kw_module
                        |"endmodule" -> Tk_Kw_endmodule
@@ -132,6 +135,8 @@ let tokenize fname =
         | '*' , _ -> unread in_f ; tk_list := (Tk_Op_Mul,   !line_num) :: !tk_list
         | '+' , _ -> unread in_f ; tk_list := (Tk_Op_Plus,  !line_num) :: !tk_list
         | '@' , _ -> unread in_f ; tk_list := (Tk_At,       !line_num) :: !tk_list
+        | '$' , _ -> unread in_f ; let s = take_while is_alphanum in_f
+                                   in tk_list := (Tk_Builtin s, !line_num) :: !tk_list
         | '\\', _ -> unread in_f ; unread in_f ;
                                 let s = take_until (function ' ' -> true | _ -> false) in_f
                                 in tk_list := (Tk_Ident s, !line_num) :: !tk_list
@@ -151,6 +156,7 @@ let tokenize fname =
 type expr = E_Plus of expr * expr
           | E_Mul of expr * expr
           | E_Variable of string
+          | E_String of string
           | E_Literal of string
           | E_Based of int * string
           | E_Range of expr * expr * expr
@@ -170,6 +176,7 @@ type stmt = S_Blk_Assign of expr * expr
           | S_Par_Block of stmt list
           | S_If of expr*stmt
           | S_If_Else of expr*stmt*stmt
+          | S_Builtin of string*expr list
 
 type module_ent = Wire   of ioreg_decl
                 | Reg    of ioreg_decl
@@ -203,6 +210,7 @@ let rec parse_delimited acc parser delim tkns =
 
 let parse_var_or_lit = function
     | (Tk_Ident s,_)::rst -> E_Variable s, rst
+    | (Tk_String s,_)::rst -> E_String s, rst
     | (Tk_Literal s,_)::(Tk_BaseHex l,_)::rst -> E_Based (int_of_string s, "h"^l), rst
     | (Tk_Literal s,_)::(Tk_BaseDec l,_)::rst -> E_Based (int_of_string s, "d"^l), rst
     | (Tk_Literal s,_)::(Tk_BaseOct l,_)::rst -> E_Based (int_of_string s, "o"^l), rst
@@ -301,8 +309,14 @@ let rec parse_stmt_list fin acc tkns = match tkns with
 
 and parse_statement = function
     | (Tk_Hash,_)::(Tk_Literal i,_)::rst -> S_Delay (int_of_string i), rst
-    | (Tk_Kw_begin,_)::rst -> let be_blk, rst = parse_stmt_list Tk_Kw_end  [] rst in S_Seq_Block be_blk, rst
-    | (Tk_Kw_fork,_)::rst  -> let fj_blk, rst = parse_stmt_list Tk_Kw_join [] rst in S_Par_Block fj_blk, rst
+    | (Tk_Kw_begin,_)::rst  -> let be_blk, rst = parse_stmt_list Tk_Kw_end  [] rst in S_Seq_Block be_blk, rst
+    | (Tk_Kw_fork,_)::rst   -> let fj_blk, rst = parse_stmt_list Tk_Kw_join [] rst in S_Par_Block fj_blk, rst
+    | (Tk_Builtin s,_)::rst -> let _,     rst = expect Tk_LParen rst in
+                               let exprs, rst = if (fst (hd rst)) = Tk_RParen 
+                                    then [], rst
+                                    else parse_delimited [] parse_expr Tk_Comma rst in
+                               let _,     rst = expect Tk_RParen rst in
+                               let _,     rst = expect Tk_Semi   rst in S_Builtin (s, exprs), rst
     | ((Tk_Kw_if,_)::rst) as i -> parse_conditional i
     | tkns                     -> let asgn, rst = parse_blk_assignment tkns in asgn, rst
 
@@ -355,3 +369,26 @@ let parse_module = function
        Module (mname, pl, ents) , rst
 
   | e -> raise (NoParse (parse_error "module module <module_name>" e))
+
+
+
+
+
+let eval_expr = function
+  | E_Literal s -> s
+  | E_String s -> s
+  | _ -> raise (NoEval "Unsupported expr :(")
+
+let eval_builtin s lst = match s with
+  | "display" -> List.iter (fun s -> print_endline ("DISPLAY: " ^ s)) lst
+  | "finish"  -> print_endline "FINISH: called"
+  | e -> raise (NoEval ("Unsupported builtin: " ^ e))
+
+let rec eval_stmt = function
+   | S_Builtin (s, lst) -> eval_builtin s (lmap eval_expr lst)
+   | S_Seq_Block lst    -> List.iter eval_stmt lst
+   | _ -> raise (NoEval "Unsupported stmt :(")
+
+let eval_initials = function
+    Module (_, _, ents) -> let stmts = List.filter_map (function Initial s -> Some s | _ -> None) ents in
+                           List.iter eval_stmt stmts 

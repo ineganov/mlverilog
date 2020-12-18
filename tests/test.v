@@ -13,6 +13,7 @@ module Blah(a,b,c);
            if(a) b = 1;
            if(b) c = 1; else d = 1;
            qwer = 1'b1;
+           $monitor(1,2,3);
            end
 
     pqpq # (.QWE(RTY)) instance_name2 ( .x(a),
