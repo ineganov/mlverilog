@@ -12,7 +12,7 @@ type token = Tk_LParen  | Tk_RParen   | Tk_LBrace  | Tk_RBrace  | Tk_LBracket | 
            | Tk_BaseHex of string | Tk_BaseDec of string | Tk_BaseOct of string | Tk_BaseBin of string
            | Tk_Ident   of string | Tk_Literal of string | Tk_String of string
            | Tk_Kw_module | Tk_Kw_endmodule | Tk_Kw_reg   | Tk_Kw_wire | Tk_Kw_posedge | Tk_Kw_negedge
-           | Tk_Kw_assign | Tk_Kw_output    | Tk_Kw_input | Tk_Kw_inout 
+           | Tk_Kw_assign | Tk_Kw_output    | Tk_Kw_input | Tk_Kw_inout | Tk_Kw_if | Tk_Kw_else
            | Tk_Kw_begin  | Tk_Kw_end | Tk_Kw_fork | Tk_Kw_join | Tk_Kw_always | Tk_Kw_initial
 
 exception UnexpectedChar of string
@@ -38,6 +38,8 @@ let kw_maybe = function "module"    -> Tk_Kw_module
                        |"join"      -> Tk_Kw_join
                        |"posedge"   -> Tk_Kw_posedge
                        |"negedge"   -> Tk_Kw_negedge
+                       |"if"        -> Tk_Kw_if
+                       |"else"      -> Tk_Kw_else
                        | s          -> Tk_Ident s
 
 let unread file = let f_len = in_channel_length file in
@@ -166,6 +168,8 @@ type stmt = S_Blk_Assign of expr * expr
           | S_Delay of int
           | S_Seq_Block of stmt list
           | S_Par_Block of stmt list
+          | S_If of expr*stmt
+          | S_If_Else of expr*stmt*stmt
 
 type module_ent = Wire   of ioreg_decl
                 | Reg    of ioreg_decl
@@ -297,9 +301,19 @@ let rec parse_stmt_list fin acc tkns = match tkns with
 
 and parse_statement = function
     | (Tk_Hash,_)::(Tk_Literal i,_)::rst -> S_Delay (int_of_string i), rst
-    | ((Tk_Kw_begin,_)::rst) -> let be_blk, rst = parse_stmt_list Tk_Kw_end  [] rst in S_Seq_Block be_blk, rst
-    | ((Tk_Kw_fork,_)::rst)  -> let fj_blk, rst = parse_stmt_list Tk_Kw_join [] rst in S_Par_Block fj_blk, rst
-    | tkns                   -> let asgn, rst = parse_blk_assignment tkns in asgn, rst
+    | (Tk_Kw_begin,_)::rst -> let be_blk, rst = parse_stmt_list Tk_Kw_end  [] rst in S_Seq_Block be_blk, rst
+    | (Tk_Kw_fork,_)::rst  -> let fj_blk, rst = parse_stmt_list Tk_Kw_join [] rst in S_Par_Block fj_blk, rst
+    | ((Tk_Kw_if,_)::rst) as i -> parse_conditional i
+    | tkns                     -> let asgn, rst = parse_blk_assignment tkns in asgn, rst
+
+and parse_conditional tkns = let _, rst = expect Tk_Kw_if  tkns in
+                             let _, rst = expect Tk_LParen rst  in
+                             let c, rst = parse_expr rst        in
+                             let _, rst = expect Tk_RParen rst  in
+                             let s, rst = parse_statement  rst  in match rst with
+                                | (Tk_Kw_else,_)::rst -> let se, rst = parse_statement rst in
+                                                         S_If_Else (c,s,se), rst
+                                | rst -> S_If (c,s), rst
 
 let parse_event = function
     | (Tk_Kw_posedge,_)::rst -> let e, rst = parse_expr rst in Posedge e, rst

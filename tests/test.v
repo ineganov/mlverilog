@@ -10,6 +10,8 @@ module Blah(a,b,c);
     always @(posedge clk, negedge reset) begin
            #40
            {w,e} = 4;
+           if(a) b = 1;
+           if(b) c = 1; else d = 1;
            qwer = 1'b1;
            end
 
