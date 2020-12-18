@@ -7,13 +7,13 @@ let fst = function (a, _) -> a
 let snd = function (_, b) -> b
 
 type token = Tk_LParen  | Tk_RParen   | Tk_LBrace  | Tk_RBrace  | Tk_LBracket | Tk_RBracket
-           | Tk_Semi    | Tk_Colon    | Tk_Comma   | Tk_Hash    | Tk_Dot
+           | Tk_Semi    | Tk_Colon    | Tk_Comma   | Tk_Hash    | Tk_Dot      | Tk_At
            | Tk_Op_Plus | Tk_Op_Minus | Tk_Op_Mul  | Tk_Op_Div  | Tk_Op_Equal
            | Tk_BaseHex of string | Tk_BaseDec of string | Tk_BaseOct of string | Tk_BaseBin of string
            | Tk_Ident   of string | Tk_Literal of string | Tk_String of string
-           | Tk_Kw_module | Tk_Kw_endmodule | Tk_Kw_reg   | Tk_Kw_wire
+           | Tk_Kw_module | Tk_Kw_endmodule | Tk_Kw_reg   | Tk_Kw_wire | Tk_Kw_posedge | Tk_Kw_negedge
            | Tk_Kw_assign | Tk_Kw_output    | Tk_Kw_input | Tk_Kw_inout 
-           | Tk_Kw_begin  | Tk_Kw_end | Tk_Kw_always
+           | Tk_Kw_begin  | Tk_Kw_end | Tk_Kw_fork | Tk_Kw_join | Tk_Kw_always | Tk_Kw_initial
 
 exception UnexpectedChar of string
 exception UnexpectedEOF  of string
@@ -31,8 +31,13 @@ let kw_maybe = function "module"    -> Tk_Kw_module
                        |"inout"     -> Tk_Kw_inout
                        |"assign"    -> Tk_Kw_assign
                        |"always"    -> Tk_Kw_always
+                       |"initial"   -> Tk_Kw_initial
                        |"begin"     -> Tk_Kw_begin
                        |"end"       -> Tk_Kw_end
+                       |"fork"      -> Tk_Kw_fork
+                       |"join"      -> Tk_Kw_join
+                       |"posedge"   -> Tk_Kw_posedge
+                       |"negedge"   -> Tk_Kw_negedge
                        | s          -> Tk_Ident s
 
 let unread file = let f_len = in_channel_length file in
@@ -124,6 +129,7 @@ let tokenize fname =
         | '=' , _ -> unread in_f ; tk_list := (Tk_Op_Equal, !line_num) :: !tk_list
         | '*' , _ -> unread in_f ; tk_list := (Tk_Op_Mul,   !line_num) :: !tk_list
         | '+' , _ -> unread in_f ; tk_list := (Tk_Op_Plus,  !line_num) :: !tk_list
+        | '@' , _ -> unread in_f ; tk_list := (Tk_At,       !line_num) :: !tk_list
         | '\\', _ -> unread in_f ; unread in_f ;
                                 let s = take_until (function ' ' -> true | _ -> false) in_f
                                 in tk_list := (Tk_Ident s, !line_num) :: !tk_list
@@ -153,6 +159,14 @@ type portmap = Portmap of string * expr
 
 type ioreg_decl = Range of expr * expr * string list | Single of string list
 
+type event = Posedge of expr | Negedge of expr | Level of expr
+
+type stmt = S_Blk_Assign of expr * expr
+          | S_Nblk_Assign of expr * expr
+          | S_Delay of int
+          | S_Seq_Block of stmt list
+          | S_Par_Block of stmt list
+
 type module_ent = Wire   of ioreg_decl
                 | Reg    of ioreg_decl
                 | Input  of ioreg_decl
@@ -160,8 +174,11 @@ type module_ent = Wire   of ioreg_decl
                 | Inout  of ioreg_decl
                 | Inst of string * string * portmap list * portmap list
                 | Assign of expr * expr
+                | Always of event list * stmt
+                | Initial of stmt
 
 type module_def = Module of string * string list * module_ent list
+
 
 let parse_error str = function
     | (q, n)::rst -> sprintf "Expected %s, at line %d" str n
@@ -269,12 +286,41 @@ let parse_assignment tkns = let lvalue, rst = parse_concat_or_idxbl tkns in
                             let expr,   rst = parse_expr rst             in
                             let _,      rst = expect Tk_Semi rst         in Assign (lvalue, expr), rst
 
+let parse_blk_assignment tkns = let lvalue, rst = parse_concat_or_idxbl tkns in
+                            let _,      rst = expect Tk_Op_Equal rst     in
+                            let expr,   rst = parse_expr rst             in
+                            let _,      rst = expect Tk_Semi rst         in S_Blk_Assign (lvalue, expr), rst
+
+let rec parse_stmt_list fin acc tkns = match tkns with
+                            | (kw,_)::rst when kw = fin -> lrev acc, rst
+                            | tkns -> let stmt, rst = parse_statement tkns in parse_stmt_list fin (stmt::acc) rst
+
+and parse_statement = function
+    | (Tk_Hash,_)::(Tk_Literal i,_)::rst -> S_Delay (int_of_string i), rst
+    | ((Tk_Kw_begin,_)::rst) -> let be_blk, rst = parse_stmt_list Tk_Kw_end  [] rst in S_Seq_Block be_blk, rst
+    | ((Tk_Kw_fork,_)::rst)  -> let fj_blk, rst = parse_stmt_list Tk_Kw_join [] rst in S_Par_Block fj_blk, rst
+    | tkns                   -> let asgn, rst = parse_blk_assignment tkns in asgn, rst
+
+let parse_event = function
+    | (Tk_Kw_posedge,_)::rst -> let e, rst = parse_expr rst in Posedge e, rst
+    | (Tk_Kw_negedge,_)::rst -> let e, rst = parse_expr rst in Negedge e, rst
+    | rst                    -> let e, rst = parse_expr rst in Level e, rst
+
+let parse_event_ctrl = function
+    | (Tk_At,_)::(Tk_Ident i,_)::rst -> [Level (E_Variable i) ], rst
+    | (Tk_At,_)::(Tk_LParen,_)::rst -> let evs, rst = parse_delimited [] parse_event Tk_Comma rst in
+                                       let _,rst = expect Tk_RParen rst in evs, rst
+    | rst -> [], rst
+
 let rec parse_mod_ent_lst acc = function
   | (Tk_Kw_wire,_)   :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Wire   ioreg::acc) rst
   | (Tk_Kw_reg,_)    :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Reg    ioreg::acc) rst
   | (Tk_Kw_input,_)  :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Input  ioreg::acc) rst
   | (Tk_Kw_output,_) :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Output ioreg::acc) rst
   | (Tk_Kw_inout,_)  :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Inout  ioreg::acc) rst
+  | (Tk_Kw_always,_) :: rst -> let evs,  rst = parse_event_ctrl rst in
+                               let stmt, rst = parse_statement  rst in parse_mod_ent_lst (Always (evs,stmt)::acc) rst
+  | (Tk_Kw_initial,_):: rst -> let stmt, rst = parse_statement  rst in parse_mod_ent_lst (Initial stmt::acc) rst
   | (Tk_Kw_assign,_) :: rst -> let assgn,rst = parse_assignment rst in parse_mod_ent_lst (assgn::acc) rst
   | (Tk_Ident _,_) as i :: rst -> let m,rst = parse_module_inst (i::rst) in parse_mod_ent_lst (m::acc) rst
   | (Tk_Kw_endmodule,_) :: rst -> lrev acc, rst

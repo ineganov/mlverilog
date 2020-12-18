@@ -5,8 +5,13 @@ module Blah(a,b,c);
     wire dsfgsdfg;
     reg h,j,k;
 
-    pqpq instance_name1 (.x(a),
-                         .y(b) ) ;
+    initial p = q;
+
+    always @(posedge clk, negedge reset) begin
+           #40
+           {w,e} = 4;
+           qwer = 1'b1;
+           end
 
     pqpq # (.QWE(RTY)) instance_name2 ( .x(a),
                          .y({a,b,3+2}) ) ;
