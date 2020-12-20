@@ -1,1 +1,1 @@
-var_a + var_b + 3*var_c[idx+1]
+5'b10xz1

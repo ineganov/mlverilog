@@ -24,6 +24,7 @@ exception Done
 exception NoParse of string
 exception UnexpectedToken of token * string
 exception NoEval of string
+exception NoWay
 
 let kw_maybe = function "module"    -> Tk_Kw_module
                        |"endmodule" -> Tk_Kw_endmodule
@@ -158,7 +159,10 @@ type expr = E_Plus of expr * expr
           | E_Variable of string
           | E_String of string
           | E_Literal of string
-          | E_Based of int * string
+          | E_Based_H of int * string
+          | E_Based_D of int * string
+          | E_Based_O of int * string
+          | E_Based_B of int * string
           | E_Range of expr * expr * expr
           | E_Index of expr * expr
           | E_Concat of expr list
@@ -211,10 +215,10 @@ let rec parse_delimited acc parser delim tkns =
 let parse_var_or_lit = function
     | (Tk_Ident s,_)::rst -> E_Variable s, rst
     | (Tk_String s,_)::rst -> E_String s, rst
-    | (Tk_Literal s,_)::(Tk_BaseHex l,_)::rst -> E_Based (int_of_string s, "h"^l), rst
-    | (Tk_Literal s,_)::(Tk_BaseDec l,_)::rst -> E_Based (int_of_string s, "d"^l), rst
-    | (Tk_Literal s,_)::(Tk_BaseOct l,_)::rst -> E_Based (int_of_string s, "o"^l), rst
-    | (Tk_Literal s,_)::(Tk_BaseBin l,_)::rst -> E_Based (int_of_string s, "b"^l), rst
+    | (Tk_Literal s,_)::(Tk_BaseHex l,_)::rst -> E_Based_H (int_of_string s, l), rst
+    | (Tk_Literal s,_)::(Tk_BaseDec l,_)::rst -> E_Based_D (int_of_string s, l), rst
+    | (Tk_Literal s,_)::(Tk_BaseOct l,_)::rst -> E_Based_O (int_of_string s, l), rst
+    | (Tk_Literal s,_)::(Tk_BaseBin l,_)::rst -> E_Based_B (int_of_string s, l), rst
     | (Tk_Literal s,_)::rst -> E_Literal s, rst
     | e -> raise (NoParse (parse_error "literal or identifier" e))
 
@@ -372,7 +376,38 @@ let parse_module = function
 
 
 
+type four_state = FourState of int*int*int*int
 
+let display = function FourState (m,l,r,v) ->
+    let str = ref "" in
+    let w = m - l + 1 in
+    for i = 0 to w - 1 do
+        match (1 land (r lsr i), 1 land (v lsr i)) with
+           | 0,0 -> str := "z" ^ !str
+           | 0,1 -> str := "x" ^ !str
+           | 1,0 -> str := "0" ^ !str
+           | 1,1 -> str := "1" ^ !str
+           | _ -> raise NoWay
+    done ; !str
+
+let fst_from_literal = function
+   | E_Literal l     -> FourState (31,0,0xFFFFFFFF, int_of_string l)
+ (*  | E_Based_H (w,l) -> *)
+   | E_Based_D (w,l) -> FourState (w-1,0, (1 lsl w) - 1, int_of_string l)
+ (*  | E_Based_O (w,l) -> *)
+   | E_Based_B (w,l) -> let r = ref 0 in
+                        let v = ref 0 in
+                        for i = 0 to w-1 do
+                           r := !r lsl 1;
+                           v := !v lsl 1;
+                           match l.[i] with
+                           | '0' -> r := !r lor 1; v := !v lor 0
+                           | '1' -> r := !r lor 1; v := !v lor 1
+                           | 'x' -> r := !r lor 0; v := !v lor 1
+                           | 'z' -> r := !r lor 0; v := !v lor 0
+                           | e -> raise (NoParse "illegal character in bin literal")
+                        done; FourState (w-1, 0, !r, !v)
+   | _ -> raise NoWay
 
 let eval_expr = function
   | E_Literal s -> s
