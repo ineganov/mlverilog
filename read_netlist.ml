@@ -1,9 +1,11 @@
 let sprintf = Printf.sprintf
-let lcase   = Char.lowercase_ascii
+let clcase  = Char.lowercase_ascii
+let code    = Char.code
 let smake   = String.make
 let lrev    = List.rev
 let lmap    = List.map
 let hd      = List.hd
+let slcase  = String.lowercase_ascii
 
 let fst = function (a, _) -> a
 let snd = function (_, b) -> b
@@ -94,7 +96,7 @@ let read_based_lit cond file =
     let str = ref "" in
     eat_space file ;
     try while true do match input_char file with
-       | a when cond a -> str := !str ^ (smake 1 (lcase a))
+       | a when cond a -> str := !str ^ (smake 1 (clcase a))
        | '_' -> ()
        |  _  -> unread file; raise Done
     done; !str
@@ -215,10 +217,10 @@ let rec parse_delimited acc parser delim tkns =
 let parse_var_or_lit = function
     | (Tk_Ident s,_)::rst -> E_Variable s, rst
     | (Tk_String s,_)::rst -> E_String s, rst
-    | (Tk_Literal s,_)::(Tk_BaseHex l,_)::rst -> E_Based_H (int_of_string s, l), rst
-    | (Tk_Literal s,_)::(Tk_BaseDec l,_)::rst -> E_Based_D (int_of_string s, l), rst
-    | (Tk_Literal s,_)::(Tk_BaseOct l,_)::rst -> E_Based_O (int_of_string s, l), rst
-    | (Tk_Literal s,_)::(Tk_BaseBin l,_)::rst -> E_Based_B (int_of_string s, l), rst
+    | (Tk_Literal s,_)::(Tk_BaseHex l,_)::rst -> E_Based_H (int_of_string s, slcase l), rst
+    | (Tk_Literal s,_)::(Tk_BaseDec l,_)::rst -> E_Based_D (int_of_string s, slcase l), rst
+    | (Tk_Literal s,_)::(Tk_BaseOct l,_)::rst -> E_Based_O (int_of_string s, slcase l), rst
+    | (Tk_Literal s,_)::(Tk_BaseBin l,_)::rst -> E_Based_B (int_of_string s, slcase l), rst
     | (Tk_Literal s,_)::rst -> E_Literal s, rst
     | e -> raise (NoParse (parse_error "literal or identifier" e))
 
@@ -392,12 +394,35 @@ let display = function FourState (m,l,r,v) ->
 
 let fst_from_literal = function
    | E_Literal l     -> FourState (31,0,0xFFFFFFFF, int_of_string l)
- (*  | E_Based_H (w,l) -> *)
-   | E_Based_D (w,l) -> FourState (w-1,0, (1 lsl w) - 1, int_of_string l)
- (*  | E_Based_O (w,l) -> *)
+   | E_Based_H (w,l) -> let r    = ref 0       in
+                        let v    = ref 0       in
+                        let mask = 1 lsl w - 1 in
+                        for i = 0 to (String.length l) - 1 do
+                            r := !r lsl 4;
+                            v := !v lsl 4;
+                            match l.[i] with
+                               | '0'..'9' as c -> r := !r lor 0xf; v := !v lor ((code c) - (code '0'))
+                               | 'a'..'f' as c -> r := !r lor 0xf; v := !v lor (10 + (code c) - (code 'a'))
+                               | 'z' -> r := !r lor 0x0; v := !v lor 0x0
+                               | 'x' -> r := !r lor 0x0; v := !v lor 0xf
+                               | _ -> raise (NoParse "illegal character in hex literal")
+                        done; FourState (w-1, 0, !r land mask, !v land mask)
+   | E_Based_D (w,l) -> let mask = 1 lsl w - 1 in FourState (w-1,0, mask, (int_of_string l) land mask )
+   | E_Based_O (w,l) -> let r = ref 0         in
+                        let v = ref 0         in
+                        let mask = 1 lsl w -1 in
+                        for i = 0 to (String.length l) - 1 do
+                            r := !r lsl 3;
+                            v := !v lsl 3;
+                            match l.[i] with
+                               | '0'..'7' as c -> r := !r lor 0x7; v := !v lor ((code c) - (code '0'))
+                               | 'z' -> r := !r lor 0x0; v := !v lor 0x0
+                               | 'x' -> r := !r lor 0x0; v := !v lor 0x7
+                               | _ -> raise (NoParse "illegal character in oct literal")
+                        done; FourState (w-1, 0, !r land mask, !v land mask)
    | E_Based_B (w,l) -> let r = ref 0 in
                         let v = ref 0 in
-                        for i = 0 to w-1 do
+                        for i = 0 to (String.length l) - 1 do
                            r := !r lsl 1;
                            v := !v lsl 1;
                            match l.[i] with
