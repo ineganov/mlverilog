@@ -214,13 +214,15 @@ let rec parse_delimited acc parser delim tkns =
     | (d,_)::rst when d == delim -> parse_delimited (item::acc) parser delim rst
     | _ -> lrev (item::acc),rst 
 
-let parse_var_or_lit = function
+let parse_var_or_lit = 
+    let prepare s = slcase (List.fold_left (fun a b -> a ^ b) "" (String.split_on_char '_' s)) in
+    function
     | (Tk_Ident s,_)::rst -> E_Variable s, rst
     | (Tk_String s,_)::rst -> E_String s, rst
-    | (Tk_Literal s,_)::(Tk_BaseHex l,_)::rst -> E_Based_H (int_of_string s, slcase l), rst
-    | (Tk_Literal s,_)::(Tk_BaseDec l,_)::rst -> E_Based_D (int_of_string s, slcase l), rst
-    | (Tk_Literal s,_)::(Tk_BaseOct l,_)::rst -> E_Based_O (int_of_string s, slcase l), rst
-    | (Tk_Literal s,_)::(Tk_BaseBin l,_)::rst -> E_Based_B (int_of_string s, slcase l), rst
+    | (Tk_Literal s,_)::(Tk_BaseHex l,_)::rst -> E_Based_H (int_of_string s, prepare l), rst
+    | (Tk_Literal s,_)::(Tk_BaseDec l,_)::rst -> E_Based_D (int_of_string s, prepare l), rst
+    | (Tk_Literal s,_)::(Tk_BaseOct l,_)::rst -> E_Based_O (int_of_string s, prepare l), rst
+    | (Tk_Literal s,_)::(Tk_BaseBin l,_)::rst -> E_Based_B (int_of_string s, prepare l), rst
     | (Tk_Literal s,_)::rst -> E_Literal s, rst
     | e -> raise (NoParse (parse_error "literal or identifier" e))
 
@@ -378,11 +380,10 @@ let parse_module = function
 
 
 
-type four_state = FourState of int*int*int*int
+type four_state = FourState of int*int*int
 
-let display = function FourState (m,l,r,v) ->
+let display = function FourState (w,r,v) ->
     let str = ref "" in
-    let w = m - l + 1 in
     for i = 0 to w - 1 do
         match (1 land (r lsr i), 1 land (v lsr i)) with
            | 0,0 -> str := "z" ^ !str
@@ -393,11 +394,11 @@ let display = function FourState (m,l,r,v) ->
     done ; !str
 
 let fst_from_literal = function
-   | E_Literal l     -> FourState (31,0,0xFFFFFFFF, int_of_string l)
+   | E_Literal l     -> FourState (32,0xFFFFFFFF, int_of_string l)
    | E_Based_H (w,l) -> let r    = ref 0       in
                         let v    = ref 0       in
                         let mask = 1 lsl w - 1 in
-                        for i = 0 to (String.length l) - 1 do
+                        for i = 0 to String.length l - 1 do
                             r := !r lsl 4;
                             v := !v lsl 4;
                             match l.[i] with
@@ -406,12 +407,12 @@ let fst_from_literal = function
                                | 'z' -> r := !r lor 0x0; v := !v lor 0x0
                                | 'x' -> r := !r lor 0x0; v := !v lor 0xf
                                | _ -> raise (NoParse "illegal character in hex literal")
-                        done; FourState (w-1, 0, !r land mask, !v land mask)
-   | E_Based_D (w,l) -> let mask = 1 lsl w - 1 in FourState (w-1,0, mask, (int_of_string l) land mask )
+                        done; FourState (w, !r land mask, !v land mask)
+   | E_Based_D (w,l) -> let mask = 1 lsl w - 1 in FourState (w, mask, (int_of_string l) land mask )
    | E_Based_O (w,l) -> let r = ref 0         in
                         let v = ref 0         in
                         let mask = 1 lsl w -1 in
-                        for i = 0 to (String.length l) - 1 do
+                        for i = 0 to String.length l - 1 do
                             r := !r lsl 3;
                             v := !v lsl 3;
                             match l.[i] with
@@ -419,10 +420,10 @@ let fst_from_literal = function
                                | 'z' -> r := !r lor 0x0; v := !v lor 0x0
                                | 'x' -> r := !r lor 0x0; v := !v lor 0x7
                                | _ -> raise (NoParse "illegal character in oct literal")
-                        done; FourState (w-1, 0, !r land mask, !v land mask)
+                        done; FourState (w, !r land mask, !v land mask)
    | E_Based_B (w,l) -> let r = ref 0 in
                         let v = ref 0 in
-                        for i = 0 to (String.length l) - 1 do
+                        for i = 0 to String.length l - 1 do
                            r := !r lsl 1;
                            v := !v lsl 1;
                            match l.[i] with
@@ -431,7 +432,7 @@ let fst_from_literal = function
                            | 'x' -> r := !r lor 0; v := !v lor 1
                            | 'z' -> r := !r lor 0; v := !v lor 0
                            | e -> raise (NoParse "illegal character in bin literal")
-                        done; FourState (w-1, 0, !r, !v)
+                        done; FourState (w, !r, !v)
    | _ -> raise NoWay
 
 let eval_expr = function
