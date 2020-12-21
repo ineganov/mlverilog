@@ -10,6 +10,7 @@ let sconcat = String.concat
 
 let fst = function (a, _) -> a
 let snd = function (_, b) -> b
+let sm_val = function (_, _, v) -> v
 
 type token = Tk_LParen  | Tk_RParen   | Tk_LBrace  | Tk_RBrace  | Tk_LBracket | Tk_RBracket
            | Tk_Semi    | Tk_Colon    | Tk_Comma   | Tk_Hash    | Tk_Dot      | Tk_At
@@ -29,6 +30,7 @@ exception UnexpectedToken of token * string
 exception NoEval of string
 exception NoWay
 exception Not_declared of string
+exception NonConstExpr
 
 let kw_maybe = function "module"    -> Tk_Kw_module
                        |"endmodule" -> Tk_Kw_endmodule
@@ -173,7 +175,7 @@ type expr = E_Plus of expr * expr
 
 type portmap = Portmap of string * expr
 
-type ioreg_decl = Range of expr * expr * string list | Single of string list
+type ioreg_decl = Range of expr * expr | Single
 
 type event = Posedge of expr | Negedge of expr | Level of expr
 
@@ -186,11 +188,9 @@ type stmt = S_Blk_Assign of expr * expr
           | S_If_Else of expr*stmt*stmt
           | S_Builtin of string*expr list
 
-type module_ent = Wire   of ioreg_decl
-                | Reg    of ioreg_decl
-                | Input  of ioreg_decl
-                | Output of ioreg_decl
-                | Inout  of ioreg_decl
+type decl_kind  = Wire | Reg | Input | Output | Inout
+
+type module_ent = Decl   of decl_kind * ioreg_decl * string list
                 | Inst of string * string * portmap list * portmap list
                 | Assign of expr * expr
                 | Always of event list * stmt
@@ -299,8 +299,8 @@ let parse_ioreg_decl tkns = match tkns with
                                      let _,  rst = expect Tk_Colon rst     in
                                      let e2, rst = parse_expr rst          in
                                      let _,  rst = expect Tk_RBracket rst  in
-                                     let il, rst = parse_ident_list [] rst in Range (e1, e2, il), rst
-    | ((Tk_Ident _,_)::rst) as i  -> let il, rst = parse_ident_list [] i   in Single il, rst
+                                     let il, rst = parse_ident_list [] rst in Range (e1, e2), il, rst
+    | ((Tk_Ident _,_)::rst) as i  -> let il, rst = parse_ident_list [] i   in Single, il, rst
     | e -> raise (NoParse (parse_error "wire/reg/input/output decl" e))
 
 let parse_assignment tkns = let lvalue, rst = parse_concat_or_idxbl tkns in
@@ -351,11 +351,16 @@ let parse_event_ctrl = function
     | rst -> [], rst
 
 let rec parse_mod_ent_lst acc = function
-  | (Tk_Kw_wire,_)   :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Wire   ioreg::acc) rst
-  | (Tk_Kw_reg,_)    :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Reg    ioreg::acc) rst
-  | (Tk_Kw_input,_)  :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Input  ioreg::acc) rst
-  | (Tk_Kw_output,_) :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Output ioreg::acc) rst
-  | (Tk_Kw_inout,_)  :: rst -> let ioreg,rst = parse_ioreg_decl rst in parse_mod_ent_lst (Inout  ioreg::acc) rst
+  | (Tk_Kw_wire,_)   :: rst -> let ioreg, lst, rst = parse_ioreg_decl rst
+                               in parse_mod_ent_lst (Decl (Wire  , ioreg, lst)::acc) rst
+  | (Tk_Kw_reg,_)    :: rst -> let ioreg, lst, rst = parse_ioreg_decl rst
+                               in parse_mod_ent_lst (Decl (Reg   , ioreg, lst)::acc) rst
+  | (Tk_Kw_input,_)  :: rst -> let ioreg, lst, rst = parse_ioreg_decl rst
+                               in parse_mod_ent_lst (Decl (Input , ioreg, lst)::acc) rst
+  | (Tk_Kw_output,_) :: rst -> let ioreg, lst, rst = parse_ioreg_decl rst
+                               in parse_mod_ent_lst (Decl (Output, ioreg, lst)::acc) rst
+  | (Tk_Kw_inout,_)  :: rst -> let ioreg, lst, rst = parse_ioreg_decl rst
+                               in parse_mod_ent_lst (Decl (Inout , ioreg, lst)::acc) rst
   | (Tk_Kw_always,_) :: rst -> let evs,  rst = parse_event_ctrl rst in
                                let stmt, rst = parse_statement  rst in parse_mod_ent_lst (Always (evs,stmt)::acc) rst
   | (Tk_Kw_initial,_):: rst -> let stmt, rst = parse_statement  rst in parse_mod_ent_lst (Initial stmt::acc) rst
@@ -448,7 +453,9 @@ let eval_expr env = function
   | E_Based_O (_,_) as u -> fst_from_literal u
   | E_Based_B (_,_) as u -> fst_from_literal u
   | E_String s       -> V_String s
-  | E_Variable s     -> (try Hashtbl.find env s with Not_found -> raise (Not_declared s))
+  | E_Variable s     -> ( match Hashtbl.find_opt env s with
+                          | Some (_,_,v) -> v
+                          | None -> raise (Not_declared s) )
   | _ -> raise (NoEval "Unsupported expr :(")
 
 let eval_builtin s lst = match s with
@@ -456,13 +463,45 @@ let eval_builtin s lst = match s with
   | "finish"  -> print_endline "FINISH: called"
   | e -> raise (NoEval ("Unsupported builtin: " ^ e))
 
+let print_symtable ents = 
+    let printer s (_,_,f) = Printf.printf "%s -> %s\n" s (display_val f)
+    in Hashtbl.iter printer ents
+
 let rec eval_stmt env = function
    | S_Builtin (s, lst) -> eval_builtin s (lmap (fun x -> eval_expr env x) lst)
    | S_Seq_Block lst    -> List.iter (fun x -> eval_stmt env x) lst
+   | S_Blk_Assign (E_Variable v, ex) -> (let rval = eval_expr env ex in
+                                        match Hashtbl.find_opt env v with
+                                        | Some (k,r,_) -> Hashtbl.remove env v;
+                                                          Hashtbl.add env v (k, r, rval);
+                                        | None -> raise (Not_declared v) )
    | _ -> raise (NoEval "Unsupported stmt :(")
+
+let eval_constexpr = function
+   | E_Unbased  _    as u -> fst_from_literal u
+   | E_Based_H (_,_) as u -> fst_from_literal u
+   | E_Based_D (_,_) as u -> fst_from_literal u
+   | E_Based_O (_,_) as u -> fst_from_literal u
+   | E_Based_B (_,_) as u -> fst_from_literal u
+   | _ -> raise NonConstExpr
+
+let all_zs = function
+    | Range (e1, e2) -> let msb = match eval_constexpr e1 with 
+                            | V_FourState (_,_,msb) -> msb 
+                            | V_String _ -> raise NonConstExpr in
+                        let lsb = match eval_constexpr e2 with 
+                            | V_FourState (_,_,lsb) -> lsb
+                            | V_String _ -> raise NonConstExpr in
+                        let w   = msb - lsb + 1  in V_FourState (w,0,0)
+    | Single -> V_FourState (1,0,0)
+
+let populate_symtable ents =
+    let env   = Hashtbl.create 100 in
+    let decls = List.filter_map (function Decl (k,r,lst) -> Some (k,r,lst) | _ -> None) ents in 
+    let add_multiple (k,r,lst) = List.iter (fun l -> Hashtbl.add env l (k,r,all_zs r)) lst in
+    List.iter (fun d -> add_multiple d) decls ; env
 
 let eval_initials = function
     Module (_, _, ents) -> let stmts = List.filter_map (function Initial s -> Some s | _ -> None) ents in
-                           let env = Hashtbl.create 100 in
-                           Hashtbl.add env "magic" (V_String "Magic Value!");
+                           let env = populate_symtable ents in
                            List.iter (fun s -> eval_stmt env s) stmts 
