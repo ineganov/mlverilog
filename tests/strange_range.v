@@ -16,7 +16,7 @@ initial begin
         #1
         $display("%b", q);
         $display("%b", p);
-        $display("%b", [2]);
+        $display("%b", (me+1)[2]);
         $finish();
         end
 

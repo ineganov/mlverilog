@@ -6,6 +6,7 @@ let lrev    = List.rev
 let lmap    = List.map
 let hd      = List.hd
 let slcase  = String.lowercase_ascii
+let sconcat = String.concat
 
 let fst = function (a, _) -> a
 let snd = function (_, b) -> b
@@ -27,6 +28,7 @@ exception NoParse of string
 exception UnexpectedToken of token * string
 exception NoEval of string
 exception NoWay
+exception Not_declared of string
 
 let kw_maybe = function "module"    -> Tk_Kw_module
                        |"endmodule" -> Tk_Kw_endmodule
@@ -160,7 +162,7 @@ type expr = E_Plus of expr * expr
           | E_Mul of expr * expr
           | E_Variable of string
           | E_String of string
-          | E_Literal of string
+          | E_Unbased of string
           | E_Based_H of int * string
           | E_Based_D of int * string
           | E_Based_O of int * string
@@ -223,7 +225,7 @@ let parse_var_or_lit =
     | (Tk_Literal s,_)::(Tk_BaseDec l,_)::rst -> E_Based_D (int_of_string s, prepare l), rst
     | (Tk_Literal s,_)::(Tk_BaseOct l,_)::rst -> E_Based_O (int_of_string s, prepare l), rst
     | (Tk_Literal s,_)::(Tk_BaseBin l,_)::rst -> E_Based_B (int_of_string s, prepare l), rst
-    | (Tk_Literal s,_)::rst -> E_Literal s, rst
+    | (Tk_Literal s,_)::rst -> E_Unbased s, rst
     | e -> raise (NoParse (parse_error "literal or identifier" e))
 
 let rec parse_idx_or_range expr tkns = let _,  rst = expect Tk_LBracket tkns in
@@ -380,9 +382,12 @@ let parse_module = function
 
 
 
-type four_state = FourState of int*int*int
+type veri_value =  V_FourState of int*int*int
+                 | V_String of string
 
-let display = function FourState (w,r,v) ->
+let display_val = function 
+   | V_String s -> s
+   | V_FourState (w,r,v) ->
     let str = ref "" in
     for i = 0 to w - 1 do
         match (1 land (r lsr i), 1 land (v lsr i)) with
@@ -394,7 +399,7 @@ let display = function FourState (w,r,v) ->
     done ; !str
 
 let fst_from_literal = function
-   | E_Literal l     -> FourState (32,0xFFFFFFFF, int_of_string l)
+   | E_Unbased l     -> V_FourState (32,0xFFFFFFFF, int_of_string l)
    | E_Based_H (w,l) -> let r    = ref 0       in
                         let v    = ref 0       in
                         let mask = 1 lsl w - 1 in
@@ -407,11 +412,11 @@ let fst_from_literal = function
                                | 'z' -> r := !r lor 0x0; v := !v lor 0x0
                                | 'x' -> r := !r lor 0x0; v := !v lor 0xf
                                | _ -> raise (NoParse "illegal character in hex literal")
-                        done; FourState (w, !r land mask, !v land mask)
-   | E_Based_D (w,l) -> let mask = 1 lsl w - 1 in FourState (w, mask, (int_of_string l) land mask )
-   | E_Based_O (w,l) -> let r = ref 0         in
-                        let v = ref 0         in
-                        let mask = 1 lsl w -1 in
+                        done; V_FourState (w, !r land mask, !v land mask)
+   | E_Based_D (w,l) -> let mask = 1 lsl w - 1 in V_FourState (w, mask, (int_of_string l) land mask )
+   | E_Based_O (w,l) -> let r = ref 0          in
+                        let v = ref 0          in
+                        let mask = 1 lsl w - 1 in
                         for i = 0 to String.length l - 1 do
                             r := !r lsl 3;
                             v := !v lsl 3;
@@ -420,7 +425,7 @@ let fst_from_literal = function
                                | 'z' -> r := !r lor 0x0; v := !v lor 0x0
                                | 'x' -> r := !r lor 0x0; v := !v lor 0x7
                                | _ -> raise (NoParse "illegal character in oct literal")
-                        done; FourState (w, !r land mask, !v land mask)
+                        done; V_FourState (w, !r land mask, !v land mask)
    | E_Based_B (w,l) -> let r = ref 0 in
                         let v = ref 0 in
                         for i = 0 to String.length l - 1 do
@@ -432,24 +437,32 @@ let fst_from_literal = function
                            | 'x' -> r := !r lor 0; v := !v lor 1
                            | 'z' -> r := !r lor 0; v := !v lor 0
                            | e -> raise (NoParse "illegal character in bin literal")
-                        done; FourState (w, !r, !v)
+                        done; V_FourState (w, !r, !v)
    | _ -> raise NoWay
 
-let eval_expr = function
-  | E_Literal s -> s
-  | E_String s -> s
+
+let eval_expr env = function
+  | E_Unbased  _    as u -> fst_from_literal u
+  | E_Based_H (_,_) as u -> fst_from_literal u
+  | E_Based_D (_,_) as u -> fst_from_literal u
+  | E_Based_O (_,_) as u -> fst_from_literal u
+  | E_Based_B (_,_) as u -> fst_from_literal u
+  | E_String s       -> V_String s
+  | E_Variable s     -> (try Hashtbl.find env s with Not_found -> raise (Not_declared s))
   | _ -> raise (NoEval "Unsupported expr :(")
 
 let eval_builtin s lst = match s with
-  | "display" -> List.iter (fun s -> print_endline ("DISPLAY: " ^ s)) lst
+  | "display" -> print_endline ("DISPLAY: " ^ (sconcat ", " (List.map display_val lst)))
   | "finish"  -> print_endline "FINISH: called"
   | e -> raise (NoEval ("Unsupported builtin: " ^ e))
 
-let rec eval_stmt = function
-   | S_Builtin (s, lst) -> eval_builtin s (lmap eval_expr lst)
-   | S_Seq_Block lst    -> List.iter eval_stmt lst
+let rec eval_stmt env = function
+   | S_Builtin (s, lst) -> eval_builtin s (lmap (fun x -> eval_expr env x) lst)
+   | S_Seq_Block lst    -> List.iter (fun x -> eval_stmt env x) lst
    | _ -> raise (NoEval "Unsupported stmt :(")
 
 let eval_initials = function
     Module (_, _, ents) -> let stmts = List.filter_map (function Initial s -> Some s | _ -> None) ents in
-                           List.iter eval_stmt stmts 
+                           let env = Hashtbl.create 100 in
+                           Hashtbl.add env "magic" (V_String "Magic Value!");
+                           List.iter (fun s -> eval_stmt env s) stmts 
