@@ -507,6 +507,63 @@ let rec eval_expr env = function
                        if w <= Sys.int_size then V_FourState (w, r, (v1 * v2) land r)
                        else raise OutOfRange
                      | _,_ -> raise UnexpectedArguments )
+
+  | E_BinAnd (a,b) -> (match eval_expr env a, eval_expr env b with
+                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
+                        let w = if w1 > w2 then w1 else w2 in
+                        let r = r1 land r2                 in
+                        V_FourState (w,r, (v1 land v2) land r  )
+                     | _,_ -> raise UnexpectedArguments )
+
+  | E_BinOr (a,b) -> (match eval_expr env a, eval_expr env b with
+                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
+                        let w = if w1 > w2 then w1 else w2 in
+                        let r = r1 land r2                 in
+                        V_FourState (w,r, (v1 lor v2) land r  )
+                     | _,_ -> raise UnexpectedArguments )
+
+  | E_BinXor (a,b) -> (match eval_expr env a, eval_expr env b with
+                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
+                        let w = if w1 > w2 then w1 else w2 in
+                        let r = r1 land r2                 in
+                        V_FourState (w,r, (v1 lxor v2) land r  )
+                     | _,_ -> raise UnexpectedArguments )
+
+  | E_Unary (Uop_Inv, a) -> (match eval_expr env a with
+                     | V_FourState (w,r,v) -> V_FourState(w,r, (lnot v) land r )
+                     | _ -> raise UnexpectedArguments )
+
+  | E_Unary (Uop_Or, a) -> (match eval_expr env a with
+                     | V_FourState (w,r,v) -> let r_r = ref 1 in
+                                              let r_v = ref 0 in
+                                              for i = 0 to w - 1 do
+                                                r_r := !r_r land (r lsr i) ;
+                                                r_v := !r_v lor (1 land (v lsr i)) ;
+                                              done;
+                                              V_FourState (1, !r_r, !r_v)
+                     | _ -> raise UnexpectedArguments )
+
+  | E_Unary (Uop_Xor, a) -> (match eval_expr env a with
+                     | V_FourState (w,r,v) -> let r_r = ref 1 in
+                                              let r_v = ref 0 in
+                                              for i = 0 to w - 1 do
+                                                r_r := !r_r land (r lsr i) ;
+                                                r_v := !r_v lxor (1 land (v lsr i)) ;
+                                              done;
+                                              V_FourState (1, !r_r, !r_v)
+                     | _ -> raise UnexpectedArguments )
+
+  | E_Unary (Uop_And, a) -> (match eval_expr env a with
+                     | V_FourState (w,r,v) -> let r_r = ref 1 in
+                                              let r_v = ref 1 in
+                                              for i = 0 to w - 1 do
+                                                r_r := !r_r land (r lsr i) ;
+                                                r_v := !r_v land (1 land (v lsr i)) ;
+                                              done;
+                                              V_FourState (1, !r_r, !r_v)
+                     | _ -> raise UnexpectedArguments )
+
+
   | _ -> raise (NoEval "Unsupported expr :(")
 
 let eval_builtin s lst = match s with
