@@ -15,6 +15,7 @@ let sm_val = function (_, _, v) -> v
 type token = Tk_LParen  | Tk_RParen   | Tk_LBrace  | Tk_RBrace  | Tk_LBracket | Tk_RBracket
            | Tk_Semi    | Tk_Colon    | Tk_Comma   | Tk_Hash    | Tk_Dot      | Tk_At
            | Tk_Op_Plus | Tk_Op_Minus | Tk_Op_Mul  | Tk_Op_Div  | Tk_Op_Equal
+           | Tk_BinAnd  | Tk_BinOr    | Tk_BinXor  | Tk_BinInv
            | Tk_BaseHex of string | Tk_BaseDec of string | Tk_BaseOct of string | Tk_BaseBin of string
            | Tk_Ident   of string | Tk_Literal of string | Tk_String of string | Tk_Builtin of string
            | Tk_Kw_module | Tk_Kw_endmodule | Tk_Kw_reg   | Tk_Kw_wire | Tk_Kw_posedge | Tk_Kw_negedge
@@ -31,6 +32,8 @@ exception NoEval of string
 exception NoWay
 exception Not_declared of string
 exception NonConstExpr
+exception UnexpectedArguments
+exception OutOfRange
 
 let kw_maybe = function "module"    -> Tk_Kw_module
                        |"endmodule" -> Tk_Kw_endmodule
@@ -141,6 +144,10 @@ let tokenize fname =
         | '=' , _ -> unread in_f ; tk_list := (Tk_Op_Equal, !line_num) :: !tk_list
         | '*' , _ -> unread in_f ; tk_list := (Tk_Op_Mul,   !line_num) :: !tk_list
         | '+' , _ -> unread in_f ; tk_list := (Tk_Op_Plus,  !line_num) :: !tk_list
+        | '&' , _ -> unread in_f ; tk_list := (Tk_BinAnd,   !line_num) :: !tk_list
+        | '|' , _ -> unread in_f ; tk_list := (Tk_BinOr,    !line_num) :: !tk_list
+        | '^' , _ -> unread in_f ; tk_list := (Tk_BinXor,   !line_num) :: !tk_list
+        | '~' , _ -> unread in_f ; tk_list := (Tk_BinInv,   !line_num) :: !tk_list
         | '@' , _ -> unread in_f ; tk_list := (Tk_At,       !line_num) :: !tk_list
         | '$' , _ -> unread in_f ; let s = take_while is_alphanum in_f
                                    in tk_list := (Tk_Builtin s, !line_num) :: !tk_list
@@ -160,18 +167,31 @@ let tokenize fname =
     done ; !tk_list
     with End_of_file -> close_in in_f ; lrev !tk_list
 
+type unary_op = Uop_And | Uop_Or | Uop_Xor | Uop_Inv
+
+let is_unary  = function Tk_BinAnd | Tk_BinOr | Tk_BinXor | Tk_BinInv -> true | _ -> false
+let unary_map = function Tk_BinAnd -> Uop_And
+                       | Tk_BinOr  -> Uop_Or
+                       | Tk_BinInv -> Uop_Inv
+                       | Tk_BinXor -> Uop_Xor
+                       | _ -> raise NoWay
+
 type expr = E_Plus of expr * expr
           | E_Mul of expr * expr
           | E_Variable of string
-          | E_String of string
+          | E_String  of string
           | E_Unbased of string
           | E_Based_H of int * string
           | E_Based_D of int * string
           | E_Based_O of int * string
           | E_Based_B of int * string
-          | E_Range of expr * expr * expr
-          | E_Index of expr * expr
-          | E_Concat of expr list
+          | E_Range   of expr * expr * expr
+          | E_Index   of expr * expr
+          | E_Concat  of expr list
+          | E_Unary   of unary_op * expr
+          | E_BinAnd  of expr * expr
+          | E_BinOr   of expr * expr
+          | E_BinXor  of expr * expr
 
 type portmap = Portmap of string * expr
 
@@ -216,7 +236,7 @@ let rec parse_delimited acc parser delim tkns =
     | (d,_)::rst when d == delim -> parse_delimited (item::acc) parser delim rst
     | _ -> lrev (item::acc),rst 
 
-let parse_var_or_lit = 
+let rec parse_primary = 
     let prepare s = slcase (List.fold_left (fun a b -> a ^ b) "" (String.split_on_char '_' s)) in
     function
     | (Tk_Ident s,_)::rst -> E_Variable s, rst
@@ -226,36 +246,53 @@ let parse_var_or_lit =
     | (Tk_Literal s,_)::(Tk_BaseOct l,_)::rst -> E_Based_O (int_of_string s, prepare l), rst
     | (Tk_Literal s,_)::(Tk_BaseBin l,_)::rst -> E_Based_B (int_of_string s, prepare l), rst
     | (Tk_Literal s,_)::rst -> E_Unbased s, rst
+    | (Tk_LParen,_)::rst -> let e, rst = parse_expr rst       in
+                            let _, rst = expect Tk_RParen rst in e, rst
     | e -> raise (NoParse (parse_error "literal or identifier" e))
 
-let rec parse_idx_or_range expr tkns = let _,  rst = expect Tk_LBracket tkns in
-                                   let e1, rst = parse_expr rst in match rst with 
+and parse_index tkns = let v_or_l, rst = parse_primary tkns in match rst with
+    | (Tk_LBracket,_)::rst -> let e1, rst = parse_expr rst in 
+                        (match rst with 
                             | (Tk_Colon,_)::rst -> let e2, rst = parse_expr rst in 
                                                    let _,  rst = expect Tk_RBracket rst in
-                                                   E_Range (expr,e1,e2), rst
-                            | (Tk_RBracket,_)::rst  -> E_Index (expr,e1), rst
+                                                   E_Range (v_or_l,e1,e2), rst
+                            | (Tk_RBracket,_)::rst  -> E_Index (v_or_l,e1), rst
                             | e -> raise (NoParse (parse_error "colon or rbracket" e))
+                        )
+    | _ -> v_or_l, rst
 
-and parse_indexable tkns = let v_or_l, rst = parse_var_or_lit tkns in
-                           match rst with
-                         | ((Tk_LBracket,_)::rst) as r -> parse_idx_or_range v_or_l r
-                         | _ -> v_or_l, rst
+and parse_unary = function
+    | (u,_)::rst when is_unary u -> let idx,rst = parse_index rst in
+                                    E_Unary (unary_map u, idx), rst
+    | rst -> parse_index rst
 
-and parse_concat tkns = let _, rst = expect Tk_LBrace tkns in
-                        let e_lst, rst = parse_delimited [] parse_expr Tk_Comma rst in
-                        let _, rst = expect Tk_RBrace rst in
-                        E_Concat e_lst, rst
+and parse_concat = function 
+    |(Tk_LBrace,_)::rst -> let e_lst, rst = parse_delimited [] parse_expr Tk_Comma rst in
+                           let _, rst = expect Tk_RBrace rst in E_Concat e_lst, rst
+    | tkns -> parse_unary tkns
 
-and parse_concat_or_idxbl = function ((Tk_LBrace,_)::rst) as i -> parse_concat i
-                                    | tkns -> parse_indexable tkns
-
-and parse_factor tkns = let f1, rst1 = parse_concat_or_idxbl tkns in match rst1 with
+and parse_factor tkns = let f1, rst1 = parse_concat tkns in match rst1 with
          | (Tk_Op_Mul,_)::rst1 -> let f2, rst = parse_factor rst1 in E_Mul (f1, f2), rst
          | _ -> f1, rst1
 
-and parse_expr tkns = let t1, rst1 = parse_factor tkns in match rst1 with
-         | (Tk_Op_Plus,_)::rst1 -> let t2, rst = parse_expr rst1 in E_Plus (t1, t2), rst
+and parse_sum tkns = let t1, rst1 = parse_factor tkns in match rst1 with
+         | (Tk_Op_Plus,_)::rst1 -> let t2, rst = parse_sum rst1 in E_Plus (t1, t2), rst
          | _ -> t1, rst1
+
+and parse_and tkns = let t1, rst1 = parse_sum tkns in match rst1 with
+         | (Tk_BinAnd,_)::rst1 -> let t2, rst = parse_and rst1 in E_BinAnd (t1, t2), rst
+         | _ -> t1, rst1 
+
+and parse_xor tkns = let t1, rst1 = parse_and tkns in match rst1 with
+         | (Tk_BinXor,_)::rst1 -> let t2, rst = parse_xor rst1 in E_BinXor (t1, t2), rst
+         | _ -> t1, rst1
+
+and parse_or  tkns = let t1, rst1 = parse_xor tkns in match rst1 with
+         | (Tk_BinOr,_)::rst1 -> let t2, rst = parse_or rst1 in E_BinOr (t1, t2), rst
+         | _ -> t1, rst1
+
+and parse_expr tkns = parse_or tkns
+
 
 
 let parse_conn tkns = let _,rst = expect Tk_Dot tkns   in
@@ -303,12 +340,12 @@ let parse_ioreg_decl tkns = match tkns with
     | ((Tk_Ident _,_)::rst) as i  -> let il, rst = parse_ident_list [] i   in Single, il, rst
     | e -> raise (NoParse (parse_error "wire/reg/input/output decl" e))
 
-let parse_assignment tkns = let lvalue, rst = parse_concat_or_idxbl tkns in
+let parse_assignment tkns = let lvalue, rst = parse_primary tkns         in (* FIXME: lvalue syntax *)
                             let _,      rst = expect Tk_Op_Equal rst     in
                             let expr,   rst = parse_expr rst             in
                             let _,      rst = expect Tk_Semi rst         in Assign (lvalue, expr), rst
 
-let parse_blk_assignment tkns = let lvalue, rst = parse_concat_or_idxbl tkns in
+let parse_blk_assignment tkns = let lvalue, rst = parse_primary tkns     in (* FIXME: lvalue syntax *)
                             let _,      rst = expect Tk_Op_Equal rst     in
                             let expr,   rst = parse_expr rst             in
                             let _,      rst = expect Tk_Semi rst         in S_Blk_Assign (lvalue, expr), rst
@@ -446,7 +483,7 @@ let fst_from_literal = function
    | _ -> raise NoWay
 
 
-let eval_expr env = function
+let rec eval_expr env = function
   | E_Unbased  _    as u -> fst_from_literal u
   | E_Based_H (_,_) as u -> fst_from_literal u
   | E_Based_D (_,_) as u -> fst_from_literal u
@@ -456,6 +493,20 @@ let eval_expr env = function
   | E_Variable s     -> ( match Hashtbl.find_opt env s with
                           | Some (_,_,v) -> v
                           | None -> raise (Not_declared s) )
+  | E_Plus (a,b) -> (match eval_expr env a, eval_expr env b with
+                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
+                       let w = 1 + if w1 > w2 then w1 else w2 in
+                       let r = 1 lsl w - 1 in (* this is wrong: take xs into account *)
+                       if w <= Sys.int_size then V_FourState (w, r, (v1 + v2) land r)
+                       else raise OutOfRange
+                     | _,_ -> raise UnexpectedArguments )
+  | E_Mul (a,b)  -> (match eval_expr env a, eval_expr env b with
+                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
+                       let w = w1 + w2 in
+                       let r = 1 lsl w - 1 in (* this is wrong: take xs into account *)
+                       if w <= Sys.int_size then V_FourState (w, r, (v1 * v2) land r)
+                       else raise OutOfRange
+                     | _,_ -> raise UnexpectedArguments )
   | _ -> raise (NoEval "Unsupported expr :(")
 
 let eval_builtin s lst = match s with
@@ -477,7 +528,7 @@ let rec eval_stmt env = function
                                         | None -> raise (Not_declared v) )
    | _ -> raise (NoEval "Unsupported stmt :(")
 
-let eval_constexpr = function
+let eval_constexpr = function (*FIXME: can easily allow more*)
    | E_Unbased  _    as u -> fst_from_literal u
    | E_Based_H (_,_) as u -> fst_from_literal u
    | E_Based_D (_,_) as u -> fst_from_literal u
