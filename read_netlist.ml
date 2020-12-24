@@ -37,6 +37,8 @@ exception NonConstExpr
 exception UnexpectedArguments
 exception OutOfRange
 exception NotImplemented of string
+exception Yield
+exception StackUnderflow
 
 let kw_maybe = function "module"    -> Tk_Kw_module
                        |"endmodule" -> Tk_Kw_endmodule
@@ -436,8 +438,8 @@ let fst_display = function
     let str = ref "" in
     for i = 0 to w - 1 do
         match (1 land (r lsr i), 1 land (v lsr i)) with
-           | 0,0 -> str := "z" ^ !str
-           | 0,1 -> str := "x" ^ !str
+           | 0,0 -> str := "x" ^ !str
+           | 0,1 -> str := "z" ^ !str
            | 1,0 -> str := "0" ^ !str
            | 1,1 -> str := "1" ^ !str
            | _ -> raise NoWay
@@ -454,8 +456,8 @@ let fst_from_literal = function
                             match l.[i] with
                                | '0'..'9' as c -> r := !r lor 0xf; v := !v lor ((code c) - (code '0'))
                                | 'a'..'f' as c -> r := !r lor 0xf; v := !v lor (10 + (code c) - (code 'a'))
-                               | 'z' -> r := !r lor 0x0; v := !v lor 0x0
-                               | 'x' -> r := !r lor 0x0; v := !v lor 0xf
+                               | 'z' -> v := !v lor 0xf
+                               | 'x' -> v := !v lor 0x0
                                | _ -> raise (NoParse "illegal character in hex literal")
                         done; V_FourState (w, !r land mask, !v land mask)
    | E_Based_D (w,l) -> let mask = 1 lsl w - 1 in V_FourState (w, mask, (int_of_string l) land mask )
@@ -467,8 +469,8 @@ let fst_from_literal = function
                             v := !v lsl 3;
                             match l.[i] with
                                | '0'..'7' as c -> r := !r lor 0x7; v := !v lor ((code c) - (code '0'))
-                               | 'z' -> r := !r lor 0x0; v := !v lor 0x0
-                               | 'x' -> r := !r lor 0x0; v := !v lor 0x7
+                               | 'z' -> v := !v lor 0x7
+                               | 'x' -> v := !v lor 0x0
                                | _ -> raise (NoParse "illegal character in oct literal")
                         done; V_FourState (w, !r land mask, !v land mask)
    | E_Based_B (w,l) -> let r = ref 0 in
@@ -479,8 +481,8 @@ let fst_from_literal = function
                            match l.[i] with
                            | '0' -> r := !r lor 1; v := !v lor 0
                            | '1' -> r := !r lor 1; v := !v lor 1
-                           | 'x' -> r := !r lor 0; v := !v lor 1
-                           | 'z' -> r := !r lor 0; v := !v lor 0
+                           | 'z' -> r := !r lor 0; v := !v lor 1
+                           | 'x' -> r := !r lor 0; v := !v lor 0
                            | e -> raise (NoParse "illegal character in bin literal")
                         done; V_FourState (w, !r, !v)
    | _ -> raise NoWay
@@ -611,7 +613,7 @@ let all_zs = function
                             | V_FourState (_,_,lsb) -> lsb
                             | V_String _ -> raise NonConstExpr in
                         let w   = msb - lsb + 1  in V_FourState (w,0,0)
-    | Single -> V_FourState (1,0,0)
+    | Single -> V_FourState (1,0,-1)
 
 let populate_symtable ents =
     let env   = {kinds  = Hashtbl.create 100;
@@ -638,6 +640,8 @@ type instr = I_Read of string
            | I_UnXor
            | I_Index of string
            | I_Builtin of string * int
+           | I_Restart
+           | I_Halt
 
 type process_state = { mutable pc     : int;
                        mutable dstack : veri_value list;
@@ -646,8 +650,9 @@ type process_state = { mutable pc     : int;
 let init_pstate ii = { pc = 0; dstack = []; instrs = Array.of_list ii}
 
 let push_dstk v pstate = pstate.dstack <- v::pstate.dstack
-let pop_dstk pstate = let v = List.hd pstate.dstack in
-                          pstate.dstack <- List.tl pstate.dstack; v
+let pop_dstk pstate = try (let v = List.hd pstate.dstack in
+                           pstate.dstack <- List.tl pstate.dstack; v )
+                      with Failure _ -> raise StackUnderflow
 let pop_dstk_n n pstate =
     let rec iter acc n = if n = 0 then acc
                          else iter (pop_dstk pstate::acc) (n-1) in iter [] n
@@ -684,7 +689,8 @@ let rec compile_stmt = function
    | _ -> raise (NoEval "Unsupported stmt for compilation :(")
 
 
-let run_instr env state inst =
+let run_instr env state =
+    let inst     = state.instrs.(state.pc)  in
     let binop fn = ( let a = pop_dstk state in
                      let b = pop_dstk state in
                      push_dstk (fn a b) state; pc_incr state ) in
@@ -706,16 +712,18 @@ let run_instr env state inst =
     | I_UnAnd         -> uop   fst_unand
     | I_UnXor         -> uop   fst_unxor
     | I_Index s       -> raise (NotImplemented "I_Index")
-    | I_Builtin (s,l) -> let lst = pop_dstk_n l state in eval_builtin s lst
+    | I_Builtin (s,l) -> let lst = pop_dstk_n l state in eval_builtin s lst ; pc_incr state
+    | I_Restart       -> state.pc <- 0 ; state.dstack <- []
+    | I_Halt          -> raise Yield
 
 let start_process env insts =
-    let ps = init_pstate insts      in
-    let l  = Array.length ps.instrs in
-    for i = 0 to l - 1 do run_instr env ps ps.instrs.(i)
-    done
+    let ps = init_pstate insts in
+    try (while true do run_instr env ps done) with
+    Yield -> print_endline "process halted"
 
 let run_initials = function
 Module (_, _, ents) -> let stmts = List.filter_map (function Initial s -> Some s | _ -> None) ents in
-                       let env = populate_symtable ents in
-                       List.iter (fun s -> start_process env (compile_stmt s)) stmts;
+                       let env   = populate_symtable ents in
+                       let bcode s = (compile_stmt s) @ [I_Halt] in
+                       List.iter (fun s -> start_process env (bcode s)) stmts;
                        env
