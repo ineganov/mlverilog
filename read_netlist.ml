@@ -1,12 +1,14 @@
-let sprintf = Printf.sprintf
-let clcase  = Char.lowercase_ascii
-let code    = Char.code
-let smake   = String.make
-let lrev    = List.rev
-let lmap    = List.map
-let hd      = List.hd
-let slcase  = String.lowercase_ascii
-let sconcat = String.concat
+let sprintf  = Printf.sprintf
+let clcase   = Char.lowercase_ascii
+let code     = Char.code
+let smake    = String.make
+let lrev     = List.rev
+let lmap     = List.map
+let hd       = List.hd
+let slcase   = String.lowercase_ascii
+let sconcat  = String.concat
+let hfind    = Hashtbl.find
+let hreplace = Hashtbl.replace
 
 let fst = function (a, _) -> a
 let snd = function (_, b) -> b
@@ -34,6 +36,7 @@ exception Not_declared of string
 exception NonConstExpr
 exception UnexpectedArguments
 exception OutOfRange
+exception NotImplemented of string
 
 let kw_maybe = function "module"    -> Tk_Kw_module
                        |"endmodule" -> Tk_Kw_endmodule
@@ -70,7 +73,7 @@ let take_while cond file = let str = ref "" in
                            done; !str
                            with End_of_file -> !str
 
-let read_string_lit file = 
+let read_string_lit file =
     let str = ref "" in
     try while true do match input_char file with
     | '\n' -> raise (UnexpectedWTF ("ERROR: encountered a newline in string literal: " ^ !str))
@@ -80,7 +83,7 @@ let read_string_lit file =
     with End_of_file -> raise (UnexpectedEOF "Unexpected EOF while looking for closing quote")
        | Done        -> !str
 
-let take_until cond file = 
+let take_until cond file =
     let str = ref "" in
     try while true do match input_char file with
      |  a when cond a -> raise Done
@@ -99,7 +102,7 @@ let dec_set = function '0'..'9' -> true | _ -> false
 let oct_set = function '0'..'7' | 'z' | 'Z' | 'x' | 'X' -> true | _ -> false
 let bin_set = function '0'..'1' | 'z' | 'Z' | 'x' | 'X' -> true | _ -> false
 
-let read_based_lit cond file = 
+let read_based_lit cond file =
     let str = ref "" in
     eat_space file ;
     try while true do match input_char file with
@@ -108,9 +111,9 @@ let read_based_lit cond file =
        |  _  -> unread file; raise Done
     done; !str
     with Done -> !str
-       | End_of_file -> !str    
+       | End_of_file -> !str
 
-let tokenize fname = 
+let tokenize fname =
     let in_f     = open_in fname in
     let line_num = ref 1 in
     let tk_list  = ref [] in
@@ -126,7 +129,7 @@ let tokenize fname =
                        in tk_list := (Tk_BaseOct l,   !line_num) :: !tk_list
         | '\'', 'b' -> let l = read_based_lit bin_set in_f
                        in tk_list := (Tk_BaseBin l,   !line_num) :: !tk_list
-        | '/' , '/' -> let _ = take_until (function '\n' -> true | _ -> false) in_f 
+        | '/' , '/' -> let _ = take_until (function '\n' -> true | _ -> false) in_f
                        in line_num := !line_num + 1
         | '\n', _ -> unread in_f ; line_num := !line_num + 1
         | ' ' , _ -> unread in_f
@@ -157,8 +160,8 @@ let tokenize fname =
         |  a  , _ when dec_set a -> unread in_f ; unread in_f ;
                                 let s = read_based_lit dec_set in_f
                                 in tk_list := (Tk_Literal s, !line_num) :: !tk_list
-        | '"' , _ -> unread in_f ; 
-                                let s = read_string_lit in_f 
+        | '"' , _ -> unread in_f ;
+                                let s = read_string_lit in_f
                                 in tk_list := (Tk_String s, !line_num) :: !tk_list
         |  a  , _ when is_alpha a -> unread in_f; unread in_f ;
                                 let s = take_while is_alphanum in_f
@@ -234,9 +237,9 @@ let ident = function
 let rec parse_delimited acc parser delim tkns =
     let item, rst = parser tkns in match rst with
     | (d,_)::rst when d == delim -> parse_delimited (item::acc) parser delim rst
-    | _ -> lrev (item::acc),rst 
+    | _ -> lrev (item::acc),rst
 
-let rec parse_primary = 
+let rec parse_primary =
     let prepare s = slcase (List.fold_left (fun a b -> a ^ b) "" (String.split_on_char '_' s)) in
     function
     | (Tk_Ident s,_)::rst -> E_Variable s, rst
@@ -251,9 +254,9 @@ let rec parse_primary =
     | e -> raise (NoParse (parse_error "literal or identifier" e))
 
 and parse_index tkns = let v_or_l, rst = parse_primary tkns in match rst with
-    | (Tk_LBracket,_)::rst -> let e1, rst = parse_expr rst in 
-                        (match rst with 
-                            | (Tk_Colon,_)::rst -> let e2, rst = parse_expr rst in 
+    | (Tk_LBracket,_)::rst -> let e1, rst = parse_expr rst in
+                        (match rst with
+                            | (Tk_Colon,_)::rst -> let e2, rst = parse_expr rst in
                                                    let _,  rst = expect Tk_RBracket rst in
                                                    E_Range (v_or_l,e1,e2), rst
                             | (Tk_RBracket,_)::rst  -> E_Index (v_or_l,e1), rst
@@ -266,7 +269,7 @@ and parse_unary = function
                                     E_Unary (unary_map u, idx), rst
     | rst -> parse_index rst
 
-and parse_concat = function 
+and parse_concat = function
     |(Tk_LBrace,_)::rst -> let e_lst, rst = parse_delimited [] parse_expr Tk_Comma rst in
                            let _, rst = expect Tk_RBrace rst in E_Concat e_lst, rst
     | tkns -> parse_unary tkns
@@ -281,7 +284,7 @@ and parse_sum tkns = let t1, rst1 = parse_factor tkns in match rst1 with
 
 and parse_and tkns = let t1, rst1 = parse_sum tkns in match rst1 with
          | (Tk_BinAnd,_)::rst1 -> let t2, rst = parse_and rst1 in E_BinAnd (t1, t2), rst
-         | _ -> t1, rst1 
+         | _ -> t1, rst1
 
 and parse_xor tkns = let t1, rst1 = parse_and tkns in match rst1 with
          | (Tk_BinXor,_)::rst1 -> let t2, rst = parse_xor rst1 in E_BinXor (t1, t2), rst
@@ -301,9 +304,9 @@ let parse_conn tkns = let _,rst = expect Tk_Dot tkns   in
                       let e,rst = parse_expr rst       in
                       let _,rst = expect Tk_RParen rst in Portmap (p,e), rst
 
-let rec parse_conn_list acc tkn = 
+let rec parse_conn_list acc tkn =
     let c,rst = parse_conn tkn in match rst with
-       | (Tk_Comma,_)::rst -> parse_conn_list (c::acc) rst 
+       | (Tk_Comma,_)::rst -> parse_conn_list (c::acc) rst
        | (Tk_RParen,_)::rst -> lrev (c::acc), rst
        | e -> raise (NoParse (parse_error "comma or rparen" e))
 
@@ -320,14 +323,14 @@ let rec parse_module_inst = function
       let _, rst = expect Tk_Semi rst in (Inst (mt, mn, pl, cl), rst)
   | e -> raise (NoParse (parse_error "module instance" e))
 
-let rec parse_port_lst acc = function 
+let rec parse_port_lst acc = function
   | (Tk_Ident s,_)::(Tk_Comma,_)::rst  -> parse_port_lst (s::acc) rst
   | (Tk_Ident s,_)::(Tk_RParen,_)::(Tk_Semi,_)::rst -> (lrev (s::acc),rst)
   | e -> raise (NoParse (parse_error "port ident" e))
 
 let rec parse_ident_list acc = function
        | (Tk_Ident i,_)::(Tk_Semi,_) ::rst -> lrev (i::acc), rst
-       | (Tk_Ident i,_)::(Tk_Comma,_)::rst -> parse_ident_list (i::acc) rst 
+       | (Tk_Ident i,_)::(Tk_Comma,_)::rst -> parse_ident_list (i::acc) rst
        | e -> raise (NoParse (parse_error "identifier" e))
 
 let parse_ioreg_decl tkns = match tkns with
@@ -359,7 +362,7 @@ and parse_statement = function
     | (Tk_Kw_begin,_)::rst  -> let be_blk, rst = parse_stmt_list Tk_Kw_end  [] rst in S_Seq_Block be_blk, rst
     | (Tk_Kw_fork,_)::rst   -> let fj_blk, rst = parse_stmt_list Tk_Kw_join [] rst in S_Par_Block fj_blk, rst
     | (Tk_Builtin s,_)::rst -> let _,     rst = expect Tk_LParen rst in
-                               let exprs, rst = if (fst (hd rst)) = Tk_RParen 
+                               let exprs, rst = if (fst (hd rst)) = Tk_RParen
                                     then [], rst
                                     else parse_delimited [] parse_expr Tk_Comma rst in
                                let _,     rst = expect Tk_RParen rst in
@@ -407,11 +410,11 @@ let rec parse_mod_ent_lst acc = function
   | e -> raise (NoParse (parse_error "module entity or endmodule" e))
 
 let parse_module = function
-  | (Tk_Kw_module,_) :: (Tk_Ident mname,_) :: (Tk_Semi,_) :: rst 
+  | (Tk_Kw_module,_) :: (Tk_Ident mname,_) :: (Tk_Semi,_) :: rst
     -> let ents, rst = parse_mod_ent_lst [] rst in
        Module (mname, [], ents) , rst
 
-  | (Tk_Kw_module,_) :: (Tk_Ident mname,_) :: (Tk_LParen,_) :: (Tk_RParen,_) :: (Tk_Semi,_) :: rst 
+  | (Tk_Kw_module,_) :: (Tk_Ident mname,_) :: (Tk_LParen,_) :: (Tk_RParen,_) :: (Tk_Semi,_) :: rst
     -> let ents, rst = parse_mod_ent_lst [] rst in
        Module (mname, [], ents) , rst
 
@@ -427,7 +430,7 @@ let parse_module = function
 type veri_value =  V_FourState of int*int*int
                  | V_String of string
 
-let display_val = function 
+let fst_display = function
    | V_String s -> s
    | V_FourState (w,r,v) ->
     let str = ref "" in
@@ -483,6 +486,80 @@ let fst_from_literal = function
    | _ -> raise NoWay
 
 
+let fst_plus a b = match a, b with
+                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
+                       let w = 1 + if w1 > w2 then w1 else w2 in
+                       let r = 1 lsl w - 1 in (* this is wrong: take xs into account *)
+                       if w <= Sys.int_size then V_FourState (w, r, (v1 + v2) land r)
+                       else raise OutOfRange
+                     | _,_ -> raise UnexpectedArguments
+
+let fst_mul a b = match a, b with
+                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
+                       let w = w1 + w2 in
+                       let r = 1 lsl w - 1 in (* this is wrong: take xs into account *)
+                       if w <= Sys.int_size then V_FourState (w, r, (v1 * v2) land r)
+                       else raise OutOfRange
+                     | _,_ -> raise UnexpectedArguments
+
+let fst_binand a b = match a, b with
+                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
+                        let w = if w1 > w2 then w1 else w2 in
+                        let r = r1 land r2                 in
+                        V_FourState (w,r, (v1 land v2) land r  )
+                     | _,_ -> raise UnexpectedArguments
+
+let fst_binor a b = match a, b with
+                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
+                        let w = if w1 > w2 then w1 else w2 in
+                        let r = r1 land r2                 in
+                        V_FourState (w,r, (v1 lor v2) land r  )
+                     | _,_ -> raise UnexpectedArguments
+
+let fst_binxor a b = match a, b with
+                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
+                        let w = if w1 > w2 then w1 else w2 in
+                        let r = r1 land r2                 in
+                        V_FourState (w,r, (v1 lxor v2) land r  )
+                     | _,_ -> raise UnexpectedArguments
+
+let fst_uninv = function V_FourState (w,r,v) -> V_FourState(w,r, (lnot v) land r )
+                        | _ -> raise UnexpectedArguments
+
+let fst_unor = function V_FourState (w,r,v) -> let r_r = ref 1 in
+                                               let r_v = ref 0 in
+                                               for i = 0 to w - 1 do
+                                                 r_r := !r_r land (r lsr i) ;
+                                                 r_v := !r_v lor (1 land (v lsr i)) ;
+                                               done;
+                                               V_FourState (1, !r_r, !r_v)
+                      | _ -> raise UnexpectedArguments
+
+let fst_unxor = function V_FourState (w,r,v) -> let r_r = ref 1 in
+                                                let r_v = ref 0 in
+                                                for i = 0 to w - 1 do
+                                                  r_r := !r_r land (r lsr i) ;
+                                                  r_v := !r_v lxor (1 land (v lsr i)) ;
+                                                done;
+                                                V_FourState (1, !r_r, !r_v)
+                      | _ -> raise UnexpectedArguments
+
+let fst_unand = function V_FourState (w,r,v) -> let r_r = ref 1 in
+                                                let r_v = ref 1 in
+                                                for i = 0 to w - 1 do
+                                                  r_r := !r_r land (r lsr i) ;
+                                                  r_v := !r_v land (1 land (v lsr i)) ;
+                                                done;
+                                                V_FourState (1, !r_r, !r_v)
+                      | _ -> raise UnexpectedArguments
+
+type process_env = { kinds  : (string, decl_kind ) Hashtbl.t ;
+                     ranges : (string, ioreg_decl) Hashtbl.t ;
+                     values : (string, veri_value) Hashtbl.t ;  }
+
+let hvalue env s   = try hfind env.values s with Not_found -> raise (Not_declared s)
+let hreplace env s v = try hreplace env.values s v with Not_found -> raise (Not_declared s)
+
 let rec eval_expr env = function
   | E_Unbased  _    as u -> fst_from_literal u
   | E_Based_H (_,_) as u -> fst_from_literal u
@@ -490,99 +567,32 @@ let rec eval_expr env = function
   | E_Based_O (_,_) as u -> fst_from_literal u
   | E_Based_B (_,_) as u -> fst_from_literal u
   | E_String s       -> V_String s
-  | E_Variable s     -> ( match Hashtbl.find_opt env s with
-                          | Some (_,_,v) -> v
-                          | None -> raise (Not_declared s) )
-  | E_Plus (a,b) -> (match eval_expr env a, eval_expr env b with
-                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
-                       let w = 1 + if w1 > w2 then w1 else w2 in
-                       let r = 1 lsl w - 1 in (* this is wrong: take xs into account *)
-                       if w <= Sys.int_size then V_FourState (w, r, (v1 + v2) land r)
-                       else raise OutOfRange
-                     | _,_ -> raise UnexpectedArguments )
-  | E_Mul (a,b)  -> (match eval_expr env a, eval_expr env b with
-                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
-                       let w = w1 + w2 in
-                       let r = 1 lsl w - 1 in (* this is wrong: take xs into account *)
-                       if w <= Sys.int_size then V_FourState (w, r, (v1 * v2) land r)
-                       else raise OutOfRange
-                     | _,_ -> raise UnexpectedArguments )
-
-  | E_BinAnd (a,b) -> (match eval_expr env a, eval_expr env b with
-                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
-                        let w = if w1 > w2 then w1 else w2 in
-                        let r = r1 land r2                 in
-                        V_FourState (w,r, (v1 land v2) land r  )
-                     | _,_ -> raise UnexpectedArguments )
-
-  | E_BinOr (a,b) -> (match eval_expr env a, eval_expr env b with
-                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
-                        let w = if w1 > w2 then w1 else w2 in
-                        let r = r1 land r2                 in
-                        V_FourState (w,r, (v1 lor v2) land r  )
-                     | _,_ -> raise UnexpectedArguments )
-
-  | E_BinXor (a,b) -> (match eval_expr env a, eval_expr env b with
-                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
-                        let w = if w1 > w2 then w1 else w2 in
-                        let r = r1 land r2                 in
-                        V_FourState (w,r, (v1 lxor v2) land r  )
-                     | _,_ -> raise UnexpectedArguments )
-
-  | E_Unary (Uop_Inv, a) -> (match eval_expr env a with
-                     | V_FourState (w,r,v) -> V_FourState(w,r, (lnot v) land r )
-                     | _ -> raise UnexpectedArguments )
-
-  | E_Unary (Uop_Or, a) -> (match eval_expr env a with
-                     | V_FourState (w,r,v) -> let r_r = ref 1 in
-                                              let r_v = ref 0 in
-                                              for i = 0 to w - 1 do
-                                                r_r := !r_r land (r lsr i) ;
-                                                r_v := !r_v lor (1 land (v lsr i)) ;
-                                              done;
-                                              V_FourState (1, !r_r, !r_v)
-                     | _ -> raise UnexpectedArguments )
-
-  | E_Unary (Uop_Xor, a) -> (match eval_expr env a with
-                     | V_FourState (w,r,v) -> let r_r = ref 1 in
-                                              let r_v = ref 0 in
-                                              for i = 0 to w - 1 do
-                                                r_r := !r_r land (r lsr i) ;
-                                                r_v := !r_v lxor (1 land (v lsr i)) ;
-                                              done;
-                                              V_FourState (1, !r_r, !r_v)
-                     | _ -> raise UnexpectedArguments )
-
-  | E_Unary (Uop_And, a) -> (match eval_expr env a with
-                     | V_FourState (w,r,v) -> let r_r = ref 1 in
-                                              let r_v = ref 1 in
-                                              for i = 0 to w - 1 do
-                                                r_r := !r_r land (r lsr i) ;
-                                                r_v := !r_v land (1 land (v lsr i)) ;
-                                              done;
-                                              V_FourState (1, !r_r, !r_v)
-                     | _ -> raise UnexpectedArguments )
-
-
+  | E_Variable s     -> ( try hfind env.values s with
+                          Not_found -> raise (Not_declared s) )
+  | E_Plus   (a,b) -> fst_plus   (eval_expr env a) (eval_expr env b)
+  | E_Mul    (a,b) -> fst_mul    (eval_expr env a) (eval_expr env b)
+  | E_BinAnd (a,b) -> fst_binand (eval_expr env a) (eval_expr env b)
+  | E_BinOr  (a,b) -> fst_binor  (eval_expr env a) (eval_expr env b)
+  | E_BinXor (a,b) -> fst_binxor (eval_expr env a) (eval_expr env b)
+  | E_Unary (Uop_Inv, a) -> fst_uninv (eval_expr env a)
+  | E_Unary (Uop_Or,  a) -> fst_unor  (eval_expr env a)
+  | E_Unary (Uop_Xor, a) -> fst_unxor (eval_expr env a)
+  | E_Unary (Uop_And, a) -> fst_unand (eval_expr env a)
   | _ -> raise (NoEval "Unsupported expr :(")
 
 let eval_builtin s lst = match s with
-  | "display" -> print_endline ("DISPLAY: " ^ (sconcat ", " (List.map display_val lst)))
+  | "display" -> print_endline ("DISPLAY: " ^ (sconcat ", " (List.map fst_display lst)))
   | "finish"  -> print_endline "FINISH: called"
   | e -> raise (NoEval ("Unsupported builtin: " ^ e))
 
-let print_symtable ents = 
-    let printer s (_,_,f) = Printf.printf "%s -> %s\n" s (display_val f)
-    in Hashtbl.iter printer ents
+let print_symtable env =
+    let printer s f = Printf.printf "%s -> %s\n" s (fst_display f)
+    in Hashtbl.iter printer env.values
 
 let rec eval_stmt env = function
    | S_Builtin (s, lst) -> eval_builtin s (lmap (fun x -> eval_expr env x) lst)
    | S_Seq_Block lst    -> List.iter (fun x -> eval_stmt env x) lst
-   | S_Blk_Assign (E_Variable v, ex) -> (let rval = eval_expr env ex in
-                                        match Hashtbl.find_opt env v with
-                                        | Some (k,r,_) -> Hashtbl.remove env v;
-                                                          Hashtbl.add env v (k, r, rval);
-                                        | None -> raise (Not_declared v) )
+   | S_Blk_Assign (E_Variable v, ex) -> () (* FIXME *)
    | _ -> raise (NoEval "Unsupported stmt :(")
 
 let eval_constexpr = function (*FIXME: can easily allow more*)
@@ -594,22 +604,118 @@ let eval_constexpr = function (*FIXME: can easily allow more*)
    | _ -> raise NonConstExpr
 
 let all_zs = function
-    | Range (e1, e2) -> let msb = match eval_constexpr e1 with 
-                            | V_FourState (_,_,msb) -> msb 
+    | Range (e1, e2) -> let msb = match eval_constexpr e1 with
+                            | V_FourState (_,_,msb) -> msb
                             | V_String _ -> raise NonConstExpr in
-                        let lsb = match eval_constexpr e2 with 
+                        let lsb = match eval_constexpr e2 with
                             | V_FourState (_,_,lsb) -> lsb
                             | V_String _ -> raise NonConstExpr in
                         let w   = msb - lsb + 1  in V_FourState (w,0,0)
     | Single -> V_FourState (1,0,0)
 
 let populate_symtable ents =
-    let env   = Hashtbl.create 100 in
-    let decls = List.filter_map (function Decl (k,r,lst) -> Some (k,r,lst) | _ -> None) ents in 
-    let add_multiple (k,r,lst) = List.iter (fun l -> Hashtbl.add env l (k,r,all_zs r)) lst in
+    let env   = {kinds  = Hashtbl.create 100;
+                 ranges = Hashtbl.create 100;
+                 values = Hashtbl.create 100;} in
+    let decls = List.filter_map (function Decl (k,r,lst) -> Some (k,r,lst) | _ -> None) ents in
+    let add_multiple (k,r,lst) = List.iter (fun s -> Hashtbl.add env.kinds  s k;
+                                                     Hashtbl.add env.ranges s r;
+                                                     Hashtbl.add env.values s (all_zs r);) lst in
     List.iter (fun d -> add_multiple d) decls ; env
 
-let eval_initials = function
-    Module (_, _, ents) -> let stmts = List.filter_map (function Initial s -> Some s | _ -> None) ents in
-                           let env = populate_symtable ents in
-                           List.iter (fun s -> eval_stmt env s) stmts 
+
+type instr = I_Read of string
+           | I_Write of string
+           | I_Literal of veri_value
+           | I_Plus
+           | I_Mul
+           | I_BinAnd
+           | I_BinOr
+           | I_BinXor
+           | I_UnInv
+           | I_UnOr
+           | I_UnAnd
+           | I_UnXor
+           | I_Index of string
+           | I_Builtin of string * int
+
+type process_state = { mutable pc     : int;
+                       mutable dstack : veri_value list;
+                               instrs : instr array ; }
+
+let init_pstate ii = { pc = 0; dstack = []; instrs = Array.of_list ii}
+
+let push_dstk v pstate = pstate.dstack <- v::pstate.dstack
+let pop_dstk pstate = let v = List.hd pstate.dstack in
+                          pstate.dstack <- List.tl pstate.dstack; v
+let pop_dstk_n n pstate =
+    let rec iter acc n = if n = 0 then acc
+                         else iter (pop_dstk pstate::acc) (n-1) in iter [] n
+let pc_incr pstate = pstate.pc <- pstate.pc+1
+
+let rec compile_expr expr =
+   let uop     a inst = (compile_expr a) @ [inst] in
+   let binop a b inst = (compile_expr a) @
+                        (compile_expr b) @ [inst] in match expr with
+  | E_Unbased  _    as u -> [I_Literal (fst_from_literal u)]
+  | E_Based_H (_,_) as u -> [I_Literal (fst_from_literal u)]
+  | E_Based_D (_,_) as u -> [I_Literal (fst_from_literal u)]
+  | E_Based_O (_,_) as u -> [I_Literal (fst_from_literal u)]
+  | E_Based_B (_,_) as u -> [I_Literal (fst_from_literal u)]
+  | E_String s           -> [I_Literal (V_String s) ]
+  | E_Variable s         -> [I_Read s]
+  | E_Plus (a,b)         -> binop a b I_Plus
+  | E_Mul (a,b)          -> binop a b I_Mul
+  | E_BinAnd (a,b)       -> binop a b I_BinAnd
+  | E_BinOr (a,b)        -> binop a b I_BinOr
+  | E_BinXor (a,b)       -> binop a b I_BinXor
+  | E_Unary (Uop_Inv, a) -> uop a I_UnInv
+  | E_Unary (Uop_Or, a)  -> uop a I_UnOr
+  | E_Unary (Uop_Xor, a) -> uop a I_UnXor
+  | E_Unary (Uop_And, a) -> uop a I_UnAnd
+  | E_Index (E_Variable a, e) -> [ I_Literal (eval_constexpr e);
+                                   I_Index a ]
+  | _ -> raise (NoEval "Unsupported expr for compilation :(")
+
+let rec compile_stmt = function
+   | S_Builtin (s, lst) -> (List.concat (lmap compile_expr lst)) @ [I_Builtin (s,List.length lst)]
+   | S_Seq_Block lst    ->  List.concat (lmap compile_stmt lst)
+   | S_Blk_Assign (E_Variable v, ex) -> (compile_expr ex) @ [I_Write v]
+   | _ -> raise (NoEval "Unsupported stmt for compilation :(")
+
+
+let run_instr env state inst =
+    let binop fn = ( let a = pop_dstk state in
+                     let b = pop_dstk state in
+                     push_dstk (fn a b) state; pc_incr state ) in
+    let uop   fn = ( let a = pop_dstk state in
+                     push_dstk (fn a) state; pc_incr state )   in
+
+    match inst with
+    | I_Read  s       -> push_dstk (hvalue env s) state; pc_incr state;
+    | I_Write s       -> let tos = pop_dstk state in
+                         hreplace env s tos; pc_incr state
+    | I_Literal v     -> push_dstk v state; pc_incr state
+    | I_Plus          -> binop fst_plus
+    | I_Mul           -> binop fst_mul
+    | I_BinAnd        -> binop fst_binand
+    | I_BinOr         -> binop fst_binor
+    | I_BinXor        -> binop fst_binxor
+    | I_UnInv         -> uop   fst_uninv
+    | I_UnOr          -> uop   fst_unor
+    | I_UnAnd         -> uop   fst_unand
+    | I_UnXor         -> uop   fst_unxor
+    | I_Index s       -> raise (NotImplemented "I_Index")
+    | I_Builtin (s,l) -> let lst = pop_dstk_n l state in eval_builtin s lst
+
+let start_process env insts =
+    let ps = init_pstate insts      in
+    let l  = Array.length ps.instrs in
+    for i = 0 to l - 1 do run_instr env ps ps.instrs.(i)
+    done
+
+let run_initials = function
+Module (_, _, ents) -> let stmts = List.filter_map (function Initial s -> Some s | _ -> None) ents in
+                       let env = populate_symtable ents in
+                       List.iter (fun s -> start_process env (compile_stmt s)) stmts;
+                       env
