@@ -206,7 +206,8 @@ type event = Posedge of expr | Negedge of expr | Level of expr
 
 type stmt = S_Blk_Assign of expr * expr
           | S_Nblk_Assign of expr * expr
-          | S_Delay of int
+          | S_Delay of int * stmt
+          | S_EvControl of event list * stmt
           | S_Seq_Block of stmt list
           | S_Par_Block of stmt list
           | S_If of expr*stmt
@@ -218,7 +219,7 @@ type decl_kind  = Wire | Reg | Input | Output | Inout
 type module_ent = Decl   of decl_kind * ioreg_decl * string list
                 | Inst of string * string * portmap list * portmap list
                 | Assign of expr * expr
-                | Always of event list * stmt
+                | Always of stmt
                 | Initial of stmt
 
 type module_def = Module of string * string list * module_ent list
@@ -359,8 +360,14 @@ let rec parse_stmt_list fin acc tkns = match tkns with
                             | (kw,_)::rst when kw = fin -> lrev acc, rst
                             | tkns -> let stmt, rst = parse_statement tkns in parse_stmt_list fin (stmt::acc) rst
 
+
+
 and parse_statement = function
-    | (Tk_Hash,_)::(Tk_Literal i,_)::rst -> S_Delay (int_of_string i), rst
+    | (Tk_Hash,_)::(Tk_Literal i,_)::rst -> let enclosed, rst = parse_statement rst in
+                                            S_Delay (int_of_string i, enclosed), rst
+    | (Tk_At,_)::rst        -> let evs,      rst = parse_event_ctrl rst in
+                               let enclosed, rst = parse_statement rst  in
+                               S_EvControl (evs, enclosed), rst
     | (Tk_Kw_begin,_)::rst  -> let be_blk, rst = parse_stmt_list Tk_Kw_end  [] rst in S_Seq_Block be_blk, rst
     | (Tk_Kw_fork,_)::rst   -> let fj_blk, rst = parse_stmt_list Tk_Kw_join [] rst in S_Par_Block fj_blk, rst
     | (Tk_Builtin s,_)::rst -> let _,     rst = expect Tk_LParen rst in
@@ -381,15 +388,15 @@ and parse_conditional tkns = let _, rst = expect Tk_Kw_if  tkns in
                                                          S_If_Else (c,s,se), rst
                                 | rst -> S_If (c,s), rst
 
-let parse_event = function
+and parse_event = function
     | (Tk_Kw_posedge,_)::rst -> let e, rst = parse_expr rst in Posedge e, rst
     | (Tk_Kw_negedge,_)::rst -> let e, rst = parse_expr rst in Negedge e, rst
     | rst                    -> let e, rst = parse_expr rst in Level e, rst
 
-let parse_event_ctrl = function
-    | (Tk_At,_)::(Tk_Ident i,_)::rst -> [Level (E_Variable i) ], rst
-    | (Tk_At,_)::(Tk_LParen,_)::rst -> let evs, rst = parse_delimited [] parse_event Tk_Comma rst in
-                                       let _,rst = expect Tk_RParen rst in evs, rst
+and parse_event_ctrl = function
+    | (Tk_Ident i,_)::rst -> [Level (E_Variable i)], rst
+    | (Tk_LParen,_)::rst  -> let evs, rst = parse_delimited [] parse_event Tk_Comma rst in
+                             let _,rst    = expect Tk_RParen rst in evs, rst
     | rst -> [], rst
 
 let rec parse_mod_ent_lst acc = function
@@ -403,8 +410,7 @@ let rec parse_mod_ent_lst acc = function
                                in parse_mod_ent_lst (Decl (Output, ioreg, lst)::acc) rst
   | (Tk_Kw_inout,_)  :: rst -> let ioreg, lst, rst = parse_ioreg_decl rst
                                in parse_mod_ent_lst (Decl (Inout , ioreg, lst)::acc) rst
-  | (Tk_Kw_always,_) :: rst -> let evs,  rst = parse_event_ctrl rst in
-                               let stmt, rst = parse_statement  rst in parse_mod_ent_lst (Always (evs,stmt)::acc) rst
+  | (Tk_Kw_always,_) :: rst -> let stmt, rst = parse_statement  rst in parse_mod_ent_lst (Always  stmt::acc) rst
   | (Tk_Kw_initial,_):: rst -> let stmt, rst = parse_statement  rst in parse_mod_ent_lst (Initial stmt::acc) rst
   | (Tk_Kw_assign,_) :: rst -> let assgn,rst = parse_assignment rst in parse_mod_ent_lst (assgn::acc) rst
   | (Tk_Ident _,_) as i :: rst -> let m,rst = parse_module_inst (i::rst) in parse_mod_ent_lst (m::acc) rst
