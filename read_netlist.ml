@@ -651,9 +651,15 @@ type instr = I_Read of string
 
 type process_state = { mutable pc     : int;
                        mutable dstack : veri_value list;
-                               instrs : instr array ; }
+                               instrs : instr array ;
+                               pid    : int ;
+                               env    : process_env }
 
-let init_pstate ii = { pc = 0; dstack = []; instrs = Array.of_list ii}
+let init_pstate p ii e = {  pc = 0; 
+                            dstack = [];
+                            instrs = Array.of_list ii;
+                            pid = p;
+                            env = e; }
 
 let push_dstk v pstate = pstate.dstack <- v::pstate.dstack
 let pop_dstk pstate = try (let v = List.hd pstate.dstack in
@@ -695,7 +701,7 @@ let rec compile_stmt = function
    | _ -> raise (NoEval "Unsupported stmt for compilation :(")
 
 
-let run_instr env state =
+let run_instr state =
     let inst     = state.instrs.(state.pc)  in
     let binop fn = ( let a = pop_dstk state in
                      let b = pop_dstk state in
@@ -704,9 +710,9 @@ let run_instr env state =
                      push_dstk (fn a) state; pc_incr state )   in
 
     match inst with
-    | I_Read  s       -> push_dstk (hvalue env s) state; pc_incr state;
+    | I_Read  s       -> push_dstk (hvalue state.env s) state; pc_incr state;
     | I_Write s       -> let tos = pop_dstk state in
-                         hreplace env s tos; pc_incr state
+                         hreplace state.env s tos; pc_incr state
     | I_Literal v     -> push_dstk v state; pc_incr state
     | I_Plus          -> binop fst_plus
     | I_Mul           -> binop fst_mul
@@ -722,14 +728,21 @@ let run_instr env state =
     | I_Restart       -> state.pc <- 0 ; state.dstack <- []
     | I_Halt          -> raise Yield
 
-let start_process env insts =
-    let ps = init_pstate insts in
-    try (while true do run_instr env ps done) with
-    Yield -> print_endline "process halted"
+let compile_process = function 
+    | Always  s -> (compile_stmt s) @ [I_Restart]
+    | Initial s -> (compile_stmt s) @ [I_Halt]
+    | Assign  _ -> raise (NotImplemented "Assign statement compilation")
+    | _         -> raise NoWay
 
-let run_initials = function
-Module (_, _, ents) -> let stmts = List.filter_map (function Initial s -> Some s | _ -> None) ents in
-                       let env   = populate_symtable ents in
-                       let bcode s = (compile_stmt s) @ [I_Halt] in
-                       List.iter (fun s -> start_process env (bcode s)) stmts;
-                       env
+let make_process_tab = function Module (_, _, ents) ->
+       let d_ents = populate_symtable ents in
+       let f_ents = List.filter (function 
+                                    | Always _ | Initial _ | Assign _ -> true 
+                                    | _ -> false ) ents in
+       let pids = List.init (List.length f_ents) (fun f -> f+1) in
+       let prcs = List.map  compile_process f_ents              in
+       List.map2 (fun n bc -> init_pstate n bc d_ents) pids prcs
+
+let run_process ps = try while true do run_instr ps done with
+                     Yield -> print_endline "process halted"
+
