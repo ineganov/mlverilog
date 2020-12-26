@@ -4,7 +4,7 @@ reg a, b;
 
 initial begin
         $display("Hello, world!");
-        $finish();
+        #1 $finish();
         end
 
 initial begin

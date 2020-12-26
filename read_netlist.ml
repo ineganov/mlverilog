@@ -635,6 +635,8 @@ let populate_symtable ents =
 type instr = I_Read of string
            | I_Write of string
            | I_Literal of veri_value
+           | I_Delay of int
+           | I_Event of event list
            | I_Plus
            | I_Mul
            | I_BinAnd
@@ -648,18 +650,29 @@ type instr = I_Read of string
            | I_Builtin of string * int
            | I_Restart
            | I_Halt
+           | I_Finish
 
-type process_state = { mutable pc     : int;
+type process_status = Stts_Ready        |
+                      Stts_Finish       |
+                      Stts_Halt         |
+                      Stts_Delay of int |
+                      Stts_Event of event list
+
+type process_state = { mutable status : process_status;
+                       mutable pc     : int;
                        mutable dstack : veri_value list;
                                instrs : instr array ;
                                pid    : int ;
-                               env    : process_env }
+                               env    : process_env ;
+                               time   : int ref  }
 
-let init_pstate p ii e = {  pc = 0; 
-                            dstack = [];
-                            instrs = Array.of_list ii;
-                            pid = p;
-                            env = e; }
+let init_pstate p ii e t = {  status = Stts_Ready;
+                              pc = 0;
+                              dstack = [];
+                              instrs = Array.of_list ii;
+                              pid = p;
+                              env = e;
+                              time = t }
 
 let push_dstk v pstate = pstate.dstack <- v::pstate.dstack
 let pop_dstk pstate = try (let v = List.hd pstate.dstack in
@@ -695,25 +708,34 @@ let rec compile_expr expr =
   | _ -> raise (NoEval "Unsupported expr for compilation :(")
 
 let rec compile_stmt = function
+   | S_Builtin ("finish", _) -> [I_Finish]
    | S_Builtin (s, lst) -> (List.concat (lmap compile_expr lst)) @ [I_Builtin (s,List.length lst)]
    | S_Seq_Block lst    ->  List.concat (lmap compile_stmt lst)
    | S_Blk_Assign (E_Variable v, ex) -> (compile_expr ex) @ [I_Write v]
+   | S_Delay (d, stmt) -> [I_Delay d] @ (compile_stmt stmt)
+   | S_EvControl (el, stmt) -> [I_Event el] @ (compile_stmt stmt)
    | _ -> raise (NoEval "Unsupported stmt for compilation :(")
 
 
-let run_instr state =
-    let inst     = state.instrs.(state.pc)  in
-    let binop fn = ( let a = pop_dstk state in
-                     let b = pop_dstk state in
-                     push_dstk (fn a b) state; pc_incr state ) in
-    let uop   fn = ( let a = pop_dstk state in
-                     push_dstk (fn a) state; pc_incr state )   in
+let run_instr ps =
+    let inst     = ps.instrs.(ps.pc)  in
+    let binop fn = ( let a = pop_dstk ps in
+                     let b = pop_dstk ps in
+                     push_dstk (fn a b) ps; pc_incr ps ) in
+    let uop   fn = ( let a = pop_dstk ps in
+                     push_dstk (fn a) ps; pc_incr ps )   in
 
     match inst with
-    | I_Read  s       -> push_dstk (hvalue state.env s) state; pc_incr state;
-    | I_Write s       -> let tos = pop_dstk state in
-                         hreplace state.env s tos; pc_incr state
-    | I_Literal v     -> push_dstk v state; pc_incr state
+    | I_Read  s       -> push_dstk (hvalue ps.env s) ps; pc_incr ps;
+    | I_Write s       -> let tos = pop_dstk ps in
+                         hreplace ps.env s tos; pc_incr ps
+    | I_Delay d       -> pc_incr ps;
+                         ps.status <- Stts_Delay (d + !(ps.time));
+                         raise Yield
+    | I_Event el      -> pc_incr ps;
+                         ps.status <- Stts_Event el;
+                         raise Yield
+    | I_Literal v     -> push_dstk v ps; pc_incr ps
     | I_Plus          -> binop fst_plus
     | I_Mul           -> binop fst_mul
     | I_BinAnd        -> binop fst_binand
@@ -724,25 +746,27 @@ let run_instr state =
     | I_UnAnd         -> uop   fst_unand
     | I_UnXor         -> uop   fst_unxor
     | I_Index s       -> raise (NotImplemented "I_Index")
-    | I_Builtin (s,l) -> let lst = pop_dstk_n l state in eval_builtin s lst ; pc_incr state
-    | I_Restart       -> state.pc <- 0 ; state.dstack <- []
-    | I_Halt          -> raise Yield
+    | I_Builtin (s,l) -> let lst = pop_dstk_n l ps in eval_builtin s lst ; pc_incr ps
+    | I_Restart       -> ps.pc <- 0 ; ps.dstack <- []
+    | I_Halt          -> ps.status <- Stts_Halt; raise Yield
+    | I_Finish        -> ps.status <- Stts_Finish; raise Yield
 
-let compile_process = function 
+let compile_process = function
     | Always  s -> (compile_stmt s) @ [I_Restart]
     | Initial s -> (compile_stmt s) @ [I_Halt]
     | Assign  _ -> raise (NotImplemented "Assign statement compilation")
     | _         -> raise NoWay
 
 let make_process_tab = function Module (_, _, ents) ->
+       let sim_time = ref 0 in
        let d_ents = populate_symtable ents in
-       let f_ents = List.filter (function 
-                                    | Always _ | Initial _ | Assign _ -> true 
+       let f_ents = List.filter (function
+                                    | Always _ | Initial _ | Assign _ -> true
                                     | _ -> false ) ents in
        let pids = List.init (List.length f_ents) (fun f -> f+1) in
        let prcs = List.map  compile_process f_ents              in
-       List.map2 (fun n bc -> init_pstate n bc d_ents) pids prcs
+       List.map2 (fun n bc -> init_pstate n bc d_ents sim_time) pids prcs
 
-let run_process ps = try while true do run_instr ps done with
-                     Yield -> print_endline "process halted"
+let run_process ps = try while true do run_instr ps done with Yield -> ()
 
+let run_tab p = lmap run_process p
