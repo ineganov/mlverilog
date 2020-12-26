@@ -10,6 +10,7 @@ let lfilter_map = List.filter_map
 let hd       = List.hd
 let slcase   = String.lowercase_ascii
 let sconcat  = String.concat
+let hadd     = Hashtbl.add
 let hfind    = Hashtbl.find
 let hreplace = Hashtbl.replace
 
@@ -568,7 +569,8 @@ let fst_unand = function V_FourState (w,r,v) -> let r_r = ref 1 in
 
 type process_env = { kinds  : (string, decl_kind ) Hashtbl.t ;
                      ranges : (string, ioreg_decl) Hashtbl.t ;
-                     values : (string, veri_value) Hashtbl.t ;  }
+                     values : (string, veri_value) Hashtbl.t ;
+                     hooks  : (string, (unit -> unit) list) Hashtbl.t  }
 
 let hvalue env s   = try hfind env.values s with Not_found -> raise (Not_declared s)
 let hreplace env s v = try hreplace env.values s v with Not_found -> raise (Not_declared s)
@@ -629,13 +631,37 @@ let all_zs = function
 let populate_symtable ents =
     let env   = {kinds  = Hashtbl.create 100;
                  ranges = Hashtbl.create 100;
-                 values = Hashtbl.create 100;} in
+                 values = Hashtbl.create 100;
+                 hooks  = Hashtbl.create 100; } in
     let decls = lfilter_map (function Decl (k,r,lst) -> Some (k,r,lst) | _ -> None) ents in
-    let add_multiple (k,r,lst) = List.iter (fun s -> Hashtbl.add env.kinds  s k;
-                                                     Hashtbl.add env.ranges s r;
-                                                     Hashtbl.add env.values s (all_zs r);) lst in
+    let add_multiple (k,r,lst) = List.iter (fun s -> hadd env.kinds  s k;
+                                                     hadd env.ranges s r;
+                                                     hadd env.values s (all_zs r);) lst in
     List.iter (fun d -> add_multiple d) decls ; env
 
+let rec expr_deps = function
+    | E_Plus (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
+    | E_Mul  (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
+    | E_Variable s    -> [s]
+    | E_String  _     -> []
+    | E_Unbased _     -> []
+    | E_Builtin _     -> []
+    | E_Based_H _     -> []
+    | E_Based_D _     -> []
+    | E_Based_O _     -> []
+    | E_Based_B _     -> []
+    | E_Range (e1,e2,e3) -> (expr_deps e1) @ (expr_deps e2) @ (expr_deps e3)
+    | E_Index   (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
+    | E_Concat  (el)     -> List.concat (lmap expr_deps el)
+    | E_Unary   (_, e)   -> (expr_deps e)
+    | E_BinAnd  (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
+    | E_BinOr   (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
+    | E_BinXor  (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
+
+let event_deps = function
+    | Posedge e -> expr_deps e
+    | Negedge e -> expr_deps e
+    | Level   e -> expr_deps e
 
 type instr = I_Read of string
            | I_Write of string
@@ -717,7 +743,6 @@ let rec compile_expr expr =
   | E_Builtin "time"     -> [I_Time]
   | E_Builtin _          -> raise (NotImplemented "Only $time is allowed in expressions")
 
- (* | _ -> raise (NoEval "Unsupported expr for compilation :(") *)
 
 let rec compile_stmt = function
    | S_Builtin ("finish", _) -> [I_Finish]
@@ -729,6 +754,15 @@ let rec compile_stmt = function
    | S_EvControl (el, stmt) -> [I_Event el] @ (compile_stmt stmt)
    | _ -> raise (NoEval "Unsupported stmt for compilation :(")
 
+let add_hook ps s f = match Hashtbl.find_opt ps.env.hooks s with
+                      | Some lst -> Hashtbl.replace ps.env.hooks s (f::lst)
+                      | None     -> Hashtbl.add ps.env.hooks s [f]
+
+let call_hooks ps s = match Hashtbl.find_opt ps.env.hooks s with
+                            | None     -> ()
+                            | Some lst -> List.iter (fun f -> f()) lst
+
+let clear_hooks env = Hashtbl.reset env.hooks
 
 let run_instr ps =
     let inst     = ps.instrs.(ps.pc)  in
@@ -740,12 +774,18 @@ let run_instr ps =
 
     match inst with
     | I_Read  s       -> push_dstk (hvalue ps.env s) ps; pc_incr ps;
-    | I_Write s       -> let tos = pop_dstk ps in
-                         hreplace ps.env s tos; pc_incr ps
+    | I_Write s       -> let tos  = pop_dstk ps in
+                         let prev = hvalue ps.env s in
+                         if prev != tos then call_hooks ps s;
+                         hreplace ps.env s tos; 
+                         pc_incr ps
     | I_Delay d       -> pc_incr ps;
                          ps.status <- Stts_Delay (d + !(ps.time));
                          raise Yield
-    | I_Event el      -> pc_incr ps;
+    | I_Event el      -> let add_hooks_here = List.concat (lmap event_deps el)  in
+                         let upd_func  = fun () -> ps.status <- Stts_Ready in
+                         List.iter (fun s -> add_hook ps s upd_func) add_hooks_here ;
+                         pc_incr ps;
                          ps.status <- Stts_Event el;
                          raise Yield
     | I_Literal v     -> push_dstk v ps; pc_incr ps
@@ -812,9 +852,11 @@ let rec wake_time n = function
 
 let simulate ps_tab =
     let time = (hd ps_tab).time in
+    let env  = (hd ps_tab).env  in
     while true do
+        clear_hooks env;
         if (have_eligible ps_tab) then (
-            run_eligible ps_tab;
+            run_eligible ps_tab; (* updates pstatus via hooks *)
             if (finish_seen ps_tab) then (
                 printf "Finish seen at %d\n" !time ; 
                 raise Done
