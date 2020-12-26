@@ -186,6 +186,7 @@ type expr = E_Plus of expr * expr
           | E_Variable of string
           | E_String  of string
           | E_Unbased of string
+          | E_Builtin of string
           | E_Based_H of int * string
           | E_Based_D of int * string
           | E_Based_O of int * string
@@ -252,6 +253,7 @@ let rec parse_primary =
     | (Tk_Literal s,_)::(Tk_BaseOct l,_)::rst -> E_Based_O (int_of_string s, prepare l), rst
     | (Tk_Literal s,_)::(Tk_BaseBin l,_)::rst -> E_Based_B (int_of_string s, prepare l), rst
     | (Tk_Literal s,_)::rst -> E_Unbased s, rst
+    | (Tk_Builtin s,_)::rst -> E_Builtin s, rst
     | (Tk_LParen,_)::rst -> let e, rst = parse_expr rst       in
                             let _, rst = expect Tk_RParen rst in e, rst
     | e -> raise (NoParse (parse_error "literal or identifier" e))
@@ -651,6 +653,7 @@ type instr = I_Read of string
            | I_Restart
            | I_Halt
            | I_Finish
+           | I_Time
 
 type process_status = Stts_Ready        |
                       Stts_Finish       |
@@ -705,10 +708,17 @@ let rec compile_expr expr =
   | E_Unary (Uop_And, a) -> uop a I_UnAnd
   | E_Index (E_Variable a, e) -> [ I_Literal (eval_constexpr e);
                                    I_Index a ]
-  | _ -> raise (NoEval "Unsupported expr for compilation :(")
+  | E_Index _            -> raise (NotImplemented "Index must be variable based")
+  | E_Range _            -> raise (NotImplemented "Ranges not implemented")
+  | E_Concat _           -> raise (NotImplemented "Concats not implemented")
+  | E_Builtin "time"     -> [I_Time]
+  | E_Builtin _          -> raise (NotImplemented "Only $time is allowed in expressions")
+
+ (* | _ -> raise (NoEval "Unsupported expr for compilation :(") *)
 
 let rec compile_stmt = function
    | S_Builtin ("finish", _) -> [I_Finish]
+   | S_Builtin ("time",   _) -> [I_Time]
    | S_Builtin (s, lst) -> (List.concat (lmap compile_expr lst)) @ [I_Builtin (s,List.length lst)]
    | S_Seq_Block lst    ->  List.concat (lmap compile_stmt lst)
    | S_Blk_Assign (E_Variable v, ex) -> (compile_expr ex) @ [I_Write v]
@@ -750,6 +760,7 @@ let run_instr ps =
     | I_Restart       -> ps.pc <- 0 ; ps.dstack <- []
     | I_Halt          -> ps.status <- Stts_Halt; raise Yield
     | I_Finish        -> ps.status <- Stts_Finish; raise Yield
+    | I_Time          -> push_dstk (V_FourState (Sys.int_size, -1, !(ps.time))) ps
 
 let compile_process = function
     | Always  s -> (compile_stmt s) @ [I_Restart]
@@ -757,8 +768,7 @@ let compile_process = function
     | Assign  _ -> raise (NotImplemented "Assign statement compilation")
     | _         -> raise NoWay
 
-let make_process_tab = function Module (_, _, ents) ->
-       let sim_time = ref 0 in
+let make_process_tab sim_time = function Module (_, _, ents) ->
        let d_ents = populate_symtable ents in
        let f_ents = List.filter (function
                                     | Always _ | Initial _ | Assign _ -> true
@@ -770,3 +780,10 @@ let make_process_tab = function Module (_, _, ents) ->
 let run_process ps = try while true do run_instr ps done with Yield -> ()
 
 let run_tab p = lmap run_process p
+
+
+let rec pick_eligible = function
+   | {status = Stts_Ready; _} as ans :: _ -> Some ans
+   | _ :: rst -> pick_eligible rst
+   | [] -> None
+
