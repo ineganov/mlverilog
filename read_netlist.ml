@@ -1,9 +1,12 @@
 let sprintf  = Printf.sprintf
+let printf   = Printf.printf
 let clcase   = Char.lowercase_ascii
 let code     = Char.code
 let smake    = String.make
 let lrev     = List.rev
 let lmap     = List.map
+let lsort    = List.sort
+let lfilter_map = List.filter_map
 let hd       = List.hd
 let slcase   = String.lowercase_ascii
 let sconcat  = String.concat
@@ -596,7 +599,7 @@ let eval_builtin s lst = match s with
   | e -> raise (NoEval ("Unsupported builtin: " ^ e))
 
 let print_symtable env =
-    let printer s f = Printf.printf "%s -> %s\n" s (fst_display f)
+    let printer s f = printf "%s -> %s\n" s (fst_display f)
     in Hashtbl.iter printer env.values
 
 let rec eval_stmt env = function
@@ -627,7 +630,7 @@ let populate_symtable ents =
     let env   = {kinds  = Hashtbl.create 100;
                  ranges = Hashtbl.create 100;
                  values = Hashtbl.create 100;} in
-    let decls = List.filter_map (function Decl (k,r,lst) -> Some (k,r,lst) | _ -> None) ents in
+    let decls = lfilter_map (function Decl (k,r,lst) -> Some (k,r,lst) | _ -> None) ents in
     let add_multiple (k,r,lst) = List.iter (fun s -> Hashtbl.add env.kinds  s k;
                                                      Hashtbl.add env.ranges s r;
                                                      Hashtbl.add env.values s (all_zs r);) lst in
@@ -760,7 +763,7 @@ let run_instr ps =
     | I_Restart       -> ps.pc <- 0 ; ps.dstack <- []
     | I_Halt          -> ps.status <- Stts_Halt; raise Yield
     | I_Finish        -> ps.status <- Stts_Finish; raise Yield
-    | I_Time          -> push_dstk (V_FourState (Sys.int_size, -1, !(ps.time))) ps
+    | I_Time          -> push_dstk (V_FourState (Sys.int_size, -1, !(ps.time))) ps ; pc_incr ps
 
 let compile_process = function
     | Always  s -> (compile_stmt s) @ [I_Restart]
@@ -768,7 +771,8 @@ let compile_process = function
     | Assign  _ -> raise (NotImplemented "Assign statement compilation")
     | _         -> raise NoWay
 
-let make_process_tab sim_time = function Module (_, _, ents) ->
+let make_process_tab = function Module (_, _, ents) ->
+       let sim_time = ref 0 in
        let d_ents = populate_symtable ents in
        let f_ents = List.filter (function
                                     | Always _ | Initial _ | Assign _ -> true
@@ -781,9 +785,44 @@ let run_process ps = try while true do run_instr ps done with Yield -> ()
 
 let run_tab p = lmap run_process p
 
+let run_eligible ps_tab =
+    let f = function {status = Stts_Ready; _} -> true | _ -> false in
+    List.iter run_process (List.filter f ps_tab)
 
-let rec pick_eligible = function
-   | {status = Stts_Ready; _} as ans :: _ -> Some ans
-   | _ :: rst -> pick_eligible rst
-   | [] -> None
+let rec have_eligible = function
+   | {status = Stts_Ready; _} :: rst -> true
+   | _ :: rst -> have_eligible rst
+   | [] -> false
 
+let rec finish_seen = function
+   | {status = Stts_Finish; _} :: rst -> true
+   | _ :: rst -> finish_seen rst
+   | [] -> false
+
+let next_time n ps_tab = 
+    let f = function {status = Stts_Delay n; _} -> Some n | _ -> None in
+    match (lsort compare (lfilter_map f ps_tab)) with
+    | x::_ -> x
+    | []   -> n    
+
+let rec wake_time n = function
+   | {status = Stts_Delay d; _} as p :: rst -> if d = n then p.status <- Stts_Ready
+   | _ :: rst -> wake_time n rst
+   | [] -> ()
+
+let simulate ps_tab =
+    let time = (hd ps_tab).time in
+    while true do
+        if (have_eligible ps_tab) then (
+            run_eligible ps_tab;
+            if (finish_seen ps_tab) then (
+                printf "Finish seen at %d\n" !time ; 
+                raise Done
+            )
+        ) else (
+            let nn = next_time !time ps_tab in 
+            time := nn;
+            printf "Advancing time to %d\n" !time ;
+            wake_time nn ps_tab
+        )
+    done
