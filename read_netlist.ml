@@ -20,7 +20,7 @@ let sm_val = function (_, _, v) -> v
 
 type token = Tk_LParen  | Tk_RParen   | Tk_LBrace  | Tk_RBrace  | Tk_LBracket | Tk_RBracket
            | Tk_Semi    | Tk_Colon    | Tk_Comma   | Tk_Hash    | Tk_Dot      | Tk_At
-           | Tk_Op_Plus | Tk_Op_Minus | Tk_Op_Mul  | Tk_Op_Div  | Tk_Op_Equal
+           | Tk_Op_Plus | Tk_Op_Minus | Tk_Op_Mul  | Tk_Op_Div  | Tk_Op_Equal | Tk_EqEq
            | Tk_BinAnd  | Tk_BinOr    | Tk_BinXor  | Tk_BinInv
            | Tk_BaseHex of string | Tk_BaseDec of string | Tk_BaseOct of string | Tk_BaseBin of string
            | Tk_Ident   of string | Tk_Literal of string | Tk_String of string | Tk_Builtin of string
@@ -137,6 +137,7 @@ let tokenize fname =
                        in tk_list := (Tk_BaseBin l,   !line_num) :: !tk_list
         | '/' , '/' -> let _ = take_until (function '\n' -> true | _ -> false) in_f
                        in line_num := !line_num + 1
+        | '=' , '=' -> tk_list := (Tk_EqEq,   !line_num) :: !tk_list
         | '\n', _ -> unread in_f ; line_num := !line_num + 1
         | ' ' , _ -> unread in_f
         | '(' , _ -> unread in_f ; tk_list := (Tk_LParen,   !line_num) :: !tk_list
@@ -199,6 +200,7 @@ type expr = E_Plus of expr * expr
           | E_Index   of expr * expr
           | E_Concat  of expr list
           | E_Unary   of unary_op * expr
+          | E_EqEq    of expr * expr
           | E_BinAnd  of expr * expr
           | E_BinOr   of expr * expr
           | E_BinXor  of expr * expr
@@ -291,7 +293,11 @@ and parse_sum tkns = let t1, rst1 = parse_factor tkns in match rst1 with
          | (Tk_Op_Plus,_)::rst1 -> let t2, rst = parse_sum rst1 in E_Plus (t1, t2), rst
          | _ -> t1, rst1
 
-and parse_and tkns = let t1, rst1 = parse_sum tkns in match rst1 with
+and parse_eq tkns = let t1, rst1 = parse_sum tkns in match rst1 with
+         | (Tk_EqEq,_)::rst1 -> let t2, rst = parse_eq rst1 in E_EqEq (t1, t2), rst
+         | _ -> t1, rst1
+
+and parse_and tkns = let t1, rst1 = parse_eq tkns in match rst1 with
          | (Tk_BinAnd,_)::rst1 -> let t2, rst = parse_and rst1 in E_BinAnd (t1, t2), rst
          | _ -> t1, rst1
 
@@ -499,6 +505,11 @@ let fst_from_literal = function
                         done; V_FourState (w, !r, !v)
    | _ -> raise NoWay
 
+(*FIXME: '==' equality should consider Xs, as opposed to '===' *)
+let fst_val = function V_FourState (_,_,v) -> v
+                     | V_String _ -> (-2)
+
+let fst_eqeq a b = if a = b then V_FourState (1, 1, 1) else V_FourState(1, 1, 0)
 
 let fst_plus a b = match a, b with
                      | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
@@ -657,6 +668,7 @@ let rec expr_deps = function
     | E_BinAnd  (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
     | E_BinOr   (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
     | E_BinXor  (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
+    | E_EqEq    (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
 
 let event_deps = function
     | Posedge e -> expr_deps e
@@ -673,6 +685,7 @@ type instr = I_Read of string
            | I_BinAnd
            | I_BinOr
            | I_BinXor
+           | I_EqEq
            | I_UnInv
            | I_UnOr
            | I_UnAnd
@@ -726,13 +739,14 @@ let rec compile_expr expr =
   | E_Based_B (_,_) as u -> [I_Literal (fst_from_literal u)]
   | E_String s           -> [I_Literal (V_String s) ]
   | E_Variable s         -> [I_Read s]
-  | E_Plus (a,b)         -> binop a b I_Plus
-  | E_Mul (a,b)          -> binop a b I_Mul
+  | E_Plus   (a,b)       -> binop a b I_Plus
+  | E_Mul    (a,b)       -> binop a b I_Mul
   | E_BinAnd (a,b)       -> binop a b I_BinAnd
-  | E_BinOr (a,b)        -> binop a b I_BinOr
+  | E_BinOr  (a,b)       -> binop a b I_BinOr
   | E_BinXor (a,b)       -> binop a b I_BinXor
+  | E_EqEq   (a,b)       -> binop a b I_EqEq
   | E_Unary (Uop_Inv, a) -> uop a I_UnInv
-  | E_Unary (Uop_Or, a)  -> uop a I_UnOr
+  | E_Unary (Uop_Or,  a) -> uop a I_UnOr
   | E_Unary (Uop_Xor, a) -> uop a I_UnXor
   | E_Unary (Uop_And, a) -> uop a I_UnAnd
   | E_Index (E_Variable a, e) -> [ I_Literal (eval_constexpr e);
@@ -760,7 +774,8 @@ let add_hook ps s f = match Hashtbl.find_opt ps.env.hooks s with
 
 let call_hooks ps s = match Hashtbl.find_opt ps.env.hooks s with
                             | None     -> ()
-                            | Some lst -> List.iter (fun f -> f()) lst
+                            | Some lst -> printf "PID %d: calling hooks!\n" ps.pid;
+                                          List.iter (fun f -> f()) lst
 
 let clear_hooks env = Hashtbl.reset env.hooks
 
@@ -776,19 +791,22 @@ let run_instr ps =
     | I_Read  s       -> push_dstk (hvalue ps.env s) ps; pc_incr ps;
     | I_Write s       -> let tos  = pop_dstk ps in
                          let prev = hvalue ps.env s in
+                         printf "PID %d: writing %d to %s\n" ps.pid (fst_val tos) s ;
                          if prev != tos then call_hooks ps s;
-                         hreplace ps.env s tos; 
+                         hreplace ps.env s tos;
                          pc_incr ps
     | I_Delay d       -> pc_incr ps;
                          ps.status <- Stts_Delay (d + !(ps.time));
                          raise Yield
     | I_Event el      -> let add_hooks_here = List.concat (lmap event_deps el)  in
                          let upd_func  = fun () -> ps.status <- Stts_Ready in
+                         printf "PID %d: adding hooks to: %s\n" ps.pid (String.concat "," add_hooks_here);
                          List.iter (fun s -> add_hook ps s upd_func) add_hooks_here ;
                          pc_incr ps;
                          ps.status <- Stts_Event el;
                          raise Yield
     | I_Literal v     -> push_dstk v ps; pc_incr ps
+    | I_EqEq          -> binop fst_eqeq
     | I_Plus          -> binop fst_plus
     | I_Mul           -> binop fst_mul
     | I_BinAnd        -> binop fst_binand
@@ -808,7 +826,10 @@ let run_instr ps =
 let compile_process = function
     | Always  s -> (compile_stmt s) @ [I_Restart]
     | Initial s -> (compile_stmt s) @ [I_Halt]
-    | Assign  _ -> raise (NotImplemented "Assign statement compilation")
+    | Assign  (E_Variable v, expr) -> let deps = expr_deps expr in
+                                      let el   = lmap (fun s -> Level (E_Variable s)) deps in
+                                      (compile_expr expr) @ [I_Write v; I_Event el]
+    | Assign _  -> raise (NotImplemented "Involved lvalues are not supported")
     | _         -> raise NoWay
 
 let make_process_tab = function Module (_, _, ents) ->
@@ -845,16 +866,15 @@ let next_time n ps_tab =
     | x::_ -> x
     | []   -> n    
 
-let rec wake_time n = function
-   | {status = Stts_Delay d; _} as p :: rst -> if d = n then p.status <- Stts_Ready
-   | _ :: rst -> wake_time n rst
-   | [] -> ()
+let wake_time n ps_tab = 
+    let f = function {status = Stts_Delay d; _} as p -> if d = n then p.status <- Stts_Ready  
+                    | _ -> () in
+    List.iter f ps_tab
 
 let simulate ps_tab =
     let time = (hd ps_tab).time in
     let env  = (hd ps_tab).env  in
     while true do
-        clear_hooks env;
         if (have_eligible ps_tab) then (
             run_eligible ps_tab; (* updates pstatus via hooks *)
             if (finish_seen ps_tab) then (
@@ -863,6 +883,7 @@ let simulate ps_tab =
             )
         ) else (
             let nn = next_time !time ps_tab in 
+            (* clear_hooks env; *)
             time := nn;
             printf "Advancing time to %d\n" !time ;
             wake_time nn ps_tab
