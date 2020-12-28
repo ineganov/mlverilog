@@ -510,6 +510,12 @@ let fst_from_literal = function
 let fst_val = function V_FourState (_,_,v) -> v
                      | V_String _ -> (-2)
 
+let fst_resize v sz = match v with
+    | V_String v -> V_String v
+    | V_FourState (w,r,v) -> let mask = 1 lsl (sz - w) - 1 in
+        if w <= sz then V_FourState(sz, r, v)
+                   else V_FourState(sz, r land mask, v land mask )
+
 let fst_eqeq a b = if a = b then V_FourState (1, 1, 1) else V_FourState(1, 1, 0)
 
 let fst_plus a b = match a, b with
@@ -631,6 +637,19 @@ let eval_constexpr = function (*FIXME: can easily allow more*)
    | E_Based_B (_,_) as u -> fst_from_literal u
    | _ -> raise NonConstExpr
 
+let rec eval_constexpr_int = function
+   | E_Unbased i -> int_of_string i
+   | E_Based_H _ as i -> fst_val (fst_from_literal i)
+   | E_Based_D _ as i -> fst_val (fst_from_literal i)
+   | E_Based_O _ as i -> fst_val (fst_from_literal i)
+   | E_Based_B _ as i -> fst_val (fst_from_literal i)
+   | E_Plus (e1, e2) -> (eval_constexpr_int e1) + (eval_constexpr_int e2)
+   | _ -> raise NonConstExpr
+
+let sizeof env s = match hfind env.ranges s with
+                   | Single -> 1
+                   | Range (e1, e2) -> (eval_constexpr_int e1) - (eval_constexpr_int e2) + 1
+
 let all_zs = function
     | Range (e1, e2) -> let msb = match eval_constexpr e1 with
                             | V_FourState (_,_,msb) -> msb
@@ -700,6 +719,7 @@ type instr = I_Read of string
            | I_Halt
            | I_Finish
            | I_Time
+           | I_Resize of string
 
 type process_status = Stts_Ready        |
                       Stts_Finish       |
@@ -767,7 +787,7 @@ let rec compile_stmt = function
    | S_Builtin ("time",   _) -> [I_Time]
    | S_Builtin (s, lst) -> (List.concat (lmap compile_expr lst)) @ [I_Builtin (s,List.length lst)]
    | S_Seq_Block lst    ->  List.concat (lmap compile_stmt lst)
-   | S_Blk_Assign (E_Variable v, ex) -> (compile_expr ex) @ [I_Write v]
+   | S_Blk_Assign (E_Variable v, ex) -> (compile_expr ex) @ [I_Resize v; I_Write v]
    | S_Delay (d, stmt) -> [I_Delay d] @ (compile_stmt stmt)
    | S_EvControl (el, stmt) -> [I_Event el; I_Clear (event_deps el)] @ (compile_stmt stmt)
    | _ -> raise (NoEval "Unsupported stmt for compilation :(")
@@ -804,6 +824,10 @@ let run_instr ps =
                          if prev != tos then unblock_theads ps s;
                          hreplace ps.env s tos;
                          pc_incr ps
+    | I_Resize s      -> let tos = pop_dstk ps     in
+                         let sz  = sizeof ps.env s in
+                         push_dstk (fst_resize tos sz) ps;
+                         pc_incr ps;
     | I_Delay d       -> pc_incr ps;
                          ps.status <- Stts_Delay (d + !(ps.time));
                          raise Yield
@@ -838,7 +862,11 @@ let compile_process = function
     | Assign  (E_Variable v, expr) -> let deps = expr_deps expr in
                                       let el   = lmap (fun s -> Level (E_Variable s)) deps in
                                       (compile_expr expr) @ 
-                                      [ I_Write v; I_Event el; I_Clear (event_deps el); I_Restart ]
+                                      [ I_Resize v; 
+                                        I_Write  v; 
+                                        I_Event el;
+                                        I_Clear (event_deps el); 
+                                        I_Restart ]
     | Assign _  -> raise (NotImplemented "Involved lvalues are not supported")
     | _         -> raise NoWay
 
