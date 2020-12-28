@@ -8,24 +8,7 @@ reg clk;
 initial clk = 1'b0;
 initial cnt = 3'b000;
 
-//always #1 clk = ~clk;
-initial begin
-        clk = 1'b0;
-     #1 clk = 1'b1;
-     #1 clk = 1'b0;
-     #1 clk = 1'b1;
-     #1 clk = 1'b0;
-     #1 clk = 1'b1;
-     #1 clk = 1'b0;
-     #1 clk = 1'b1;
-     #1 clk = 1'b0;
-     #1 clk = 1'b1;
-     #1 clk = 1'b0;
-     #1 clk = 1'b1;
-     #1 clk = 1'b0;
-     #1 clk = 1'b1;
-     #1 clk = 1'b0;
-end
+always #1 clk = ~clk;
 
 always @(posedge clk) cnt = next_cnt;
 
