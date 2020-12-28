@@ -464,6 +464,10 @@ let fst_display = function
            | _ -> raise NoWay
     done ; !str
 
+let fst_display_dec = function
+   | V_String s -> s
+   | V_FourState (w,r,v) -> string_of_int v
+
 let fst_from_literal = function
    | E_Unbased l     -> V_FourState (32,0xFFFFFFFF, int_of_string l)
    | E_Based_H (w,l) -> let r    = ref 0       in
@@ -506,17 +510,22 @@ let fst_from_literal = function
                         done; V_FourState (w, !r, !v)
    | _ -> raise NoWay
 
-(*FIXME: '==' equality should consider Xs, as opposed to '===' *)
 let fst_val = function V_FourState (_,_,v) -> v
                      | V_String _ -> (-2)
 
 let fst_resize v sz = match v with
     | V_String v -> V_String v
-    | V_FourState (w,r,v) -> let mask = 1 lsl (sz - w) - 1 in
+    | V_FourState (w,r,v) -> let mask = 1 lsl sz - 1 in
         if w <= sz then V_FourState(sz, r, v)
                    else V_FourState(sz, r land mask, v land mask )
 
-let fst_eqeq a b = if a = b then V_FourState (1, 1, 1) else V_FourState(1, 1, 0)
+(*FIXME: '==' equality should consider Xs, as opposed to '===' *)
+let fst_eqeq a b = match a, b with
+                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
+                        if a = b then V_FourState (1, 1, 1) else V_FourState(1, 1, 0)
+                     | V_String s1, V_String s2 ->
+                        if s1 = s2 then V_FourState (1, 1, 1) else V_FourState(1, 1, 0)
+                     | _,_ -> raise UnexpectedArguments
 
 let fst_plus a b = match a, b with
                      | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
@@ -615,7 +624,7 @@ let rec eval_expr env = function
   | _ -> raise (NoEval "Unsupported expr :(")
 
 let eval_builtin s lst = match s with
-  | "display" -> print_endline ("DISPLAY: " ^ (sconcat ", " (List.map fst_display lst)))
+  | "display" -> print_endline ("DISPLAY: " ^ (sconcat ", " (List.map fst_display_dec lst)))
   | "finish"  -> print_endline "FINISH: called"
   | e -> raise (NoEval ("Unsupported builtin: " ^ e))
 
