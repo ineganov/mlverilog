@@ -6,6 +6,7 @@ let smake    = String.make
 let lrev     = List.rev
 let lmap     = List.map
 let lsort    = List.sort
+let lfilter  = List.filter
 let lfilter_map = List.filter_map
 let hd       = List.hd
 let slcase   = String.lowercase_ascii
@@ -581,7 +582,8 @@ let fst_unand = function V_FourState (w,r,v) -> let r_r = ref 1 in
 type process_env = { kinds  : (string, decl_kind ) Hashtbl.t ;
                      ranges : (string, ioreg_decl) Hashtbl.t ;
                      values : (string, veri_value) Hashtbl.t ;
-                     hooks  : (string, (unit -> unit) list) Hashtbl.t  }
+                     hooks  : (string, int list) Hashtbl.t   ;
+             mutable unblk  : int list }
 
 let hvalue env s   = try hfind env.values s with Not_found -> raise (Not_declared s)
 let hreplace env s v = try hreplace env.values s v with Not_found -> raise (Not_declared s)
@@ -643,7 +645,8 @@ let populate_symtable ents =
     let env   = {kinds  = Hashtbl.create 100;
                  ranges = Hashtbl.create 100;
                  values = Hashtbl.create 100;
-                 hooks  = Hashtbl.create 100; } in
+                 hooks  = Hashtbl.create 100;
+                 unblk  = [] } in
     let decls = lfilter_map (function Decl (k,r,lst) -> Some (k,r,lst) | _ -> None) ents in
     let add_multiple (k,r,lst) = List.iter (fun s -> hadd env.kinds  s k;
                                                      hadd env.ranges s r;
@@ -670,16 +673,17 @@ let rec expr_deps = function
     | E_BinXor  (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
     | E_EqEq    (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
 
-let event_deps = function
-    | Posedge e -> expr_deps e
-    | Negedge e -> expr_deps e
-    | Level   e -> expr_deps e
+let event_deps el = let f = function | Posedge e -> expr_deps e
+                                     | Negedge e -> expr_deps e
+                                     | Level   e -> expr_deps e
+                    in List.concat (lmap f el)
 
 type instr = I_Read of string
            | I_Write of string
            | I_Literal of veri_value
            | I_Delay of int
            | I_Event of event list
+           | I_Clear of string list
            | I_Plus
            | I_Mul
            | I_BinAnd
@@ -765,19 +769,24 @@ let rec compile_stmt = function
    | S_Seq_Block lst    ->  List.concat (lmap compile_stmt lst)
    | S_Blk_Assign (E_Variable v, ex) -> (compile_expr ex) @ [I_Write v]
    | S_Delay (d, stmt) -> [I_Delay d] @ (compile_stmt stmt)
-   | S_EvControl (el, stmt) -> [I_Event el] @ (compile_stmt stmt)
+   | S_EvControl (el, stmt) -> [I_Event el; I_Clear (event_deps el)] @ (compile_stmt stmt)
    | _ -> raise (NoEval "Unsupported stmt for compilation :(")
 
-let add_hook ps s f = match Hashtbl.find_opt ps.env.hooks s with
-                      | Some lst -> Hashtbl.replace ps.env.hooks s (f::lst)
-                      | None     -> Hashtbl.add ps.env.hooks s [f]
+let add_hook ps s = match Hashtbl.find_opt ps.env.hooks s with
+                      | Some lst -> Hashtbl.replace ps.env.hooks s (ps.pid::lst)
+                      | None     -> Hashtbl.add ps.env.hooks s [ps.pid]
 
-let call_hooks ps s = match Hashtbl.find_opt ps.env.hooks s with
-                            | None     -> ()
-                            | Some lst -> printf "PID %d: calling hooks!\n" ps.pid;
-                                          List.iter (fun f -> f()) lst
+let unblock_theads ps s = match Hashtbl.find_opt ps.env.hooks s with
+    | None     -> ()
+    | Some lst -> printf "PID %d: unblocking %s\n" ps.pid (sconcat ", " (lmap string_of_int lst));
+                  ps.env.unblk <- lst @ ps.env.unblk
 
-let clear_hooks env = Hashtbl.reset env.hooks
+let clear_hook ps lst =
+    let not_l pid = pid != ps.pid in
+    let iter s = ( match Hashtbl.find_opt ps.env.hooks s with
+                    | Some lst -> Hashtbl.replace ps.env.hooks s (lfilter not_l lst)
+                    | None -> () ) in
+    List.iter iter lst
 
 let run_instr ps =
     let inst     = ps.instrs.(ps.pc)  in
@@ -792,19 +801,19 @@ let run_instr ps =
     | I_Write s       -> let tos  = pop_dstk ps in
                          let prev = hvalue ps.env s in
                          printf "PID %d: writing %d to %s\n" ps.pid (fst_val tos) s ;
-                         if prev != tos then call_hooks ps s;
+                         if prev != tos then unblock_theads ps s;
                          hreplace ps.env s tos;
                          pc_incr ps
     | I_Delay d       -> pc_incr ps;
                          ps.status <- Stts_Delay (d + !(ps.time));
                          raise Yield
-    | I_Event el      -> let add_hooks_here = List.concat (lmap event_deps el)  in
-                         let upd_func  = fun () -> ps.status <- Stts_Ready in
+    | I_Event el      -> let add_hooks_here = event_deps el in
                          printf "PID %d: adding hooks to: %s\n" ps.pid (String.concat "," add_hooks_here);
-                         List.iter (fun s -> add_hook ps s upd_func) add_hooks_here ;
+                         List.iter (fun s -> add_hook ps s) add_hooks_here ;
                          pc_incr ps;
                          ps.status <- Stts_Event el;
                          raise Yield
+    | I_Clear el_s    -> clear_hook ps el_s; pc_incr ps
     | I_Literal v     -> push_dstk v ps; pc_incr ps
     | I_EqEq          -> binop fst_eqeq
     | I_Plus          -> binop fst_plus
@@ -828,7 +837,8 @@ let compile_process = function
     | Initial s -> (compile_stmt s) @ [I_Halt]
     | Assign  (E_Variable v, expr) -> let deps = expr_deps expr in
                                       let el   = lmap (fun s -> Level (E_Variable s)) deps in
-                                      (compile_expr expr) @ [I_Write v; I_Event el]
+                                      (compile_expr expr) @ 
+                                      [ I_Write v; I_Event el; I_Clear (event_deps el); I_Restart ]
     | Assign _  -> raise (NotImplemented "Involved lvalues are not supported")
     | _         -> raise NoWay
 
@@ -871,21 +881,31 @@ let wake_time n ps_tab =
                     | _ -> () in
     List.iter f ps_tab
 
+let wake_unblock ps_tab lst = (*FIXME: Lame, dude *)
+    List.iter (fun pid -> (List.nth ps_tab (pid-1)).status <- Stts_Ready ) lst
+
 let simulate ps_tab =
     let time = (hd ps_tab).time in
     let env  = (hd ps_tab).env  in
     while true do
         if (have_eligible ps_tab) then (
-            run_eligible ps_tab; (* updates pstatus via hooks *)
+            run_eligible ps_tab; (* updates unblock list via hooks *)
+            wake_unblock ps_tab env.unblk;
+            env.unblk <- [];
             if (finish_seen ps_tab) then (
                 printf "Finish seen at %d\n" !time ; 
                 raise Done
             )
         ) else (
             let nn = next_time !time ps_tab in 
-            (* clear_hooks env; *)
             time := nn;
             printf "Advancing time to %d\n" !time ;
             wake_time nn ps_tab
         )
     done
+
+let main path = let m      = fst ( parse_module ( tokenize path ) ) in
+                let ps_tab = make_process_tab m in
+                simulate ps_tab ;;
+
+main Sys.argv.(1) ;;
