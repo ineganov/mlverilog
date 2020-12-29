@@ -155,6 +155,7 @@ let tokenize fname =
         | '=' , _ -> unread in_f ; tk_list := (Tk_Op_Equal, !line_num) :: !tk_list
         | '*' , _ -> unread in_f ; tk_list := (Tk_Op_Mul,   !line_num) :: !tk_list
         | '+' , _ -> unread in_f ; tk_list := (Tk_Op_Plus,  !line_num) :: !tk_list
+        | '-' , _ -> unread in_f ; tk_list := (Tk_Op_Minus, !line_num) :: !tk_list
         | '&' , _ -> unread in_f ; tk_list := (Tk_BinAnd,   !line_num) :: !tk_list
         | '|' , _ -> unread in_f ; tk_list := (Tk_BinOr,    !line_num) :: !tk_list
         | '^' , _ -> unread in_f ; tk_list := (Tk_BinXor,   !line_num) :: !tk_list
@@ -187,7 +188,8 @@ let unary_map = function Tk_BinAnd -> Uop_And
                        | Tk_BinXor -> Uop_Xor
                        | _ -> raise NoWay
 
-type expr = E_Plus of expr * expr
+type expr = E_Plus  of expr * expr
+          | E_Minus of expr * expr
           | E_Mul of expr * expr
           | E_Variable of string
           | E_String  of string
@@ -290,9 +292,18 @@ and parse_factor tkns = let f1, rst1 = parse_concat tkns in match rst1 with
          | (Tk_Op_Mul,_)::rst1 -> let f2, rst = parse_factor rst1 in E_Mul (f1, f2), rst
          | _ -> f1, rst1
 
-and parse_sum tkns = let t1, rst1 = parse_factor tkns in match rst1 with
-         | (Tk_Op_Plus,_)::rst1 -> let t2, rst = parse_sum rst1 in E_Plus (t1, t2), rst
-         | _ -> t1, rst1
+and parse_sum tkns =
+        let rec parse_sum_tick acc = (function
+             | (Tk_Op_Plus,_)::rst  -> let t, rst = parse_factor rst in
+                                      parse_sum_tick ((true, t)::acc) rst
+             | (Tk_Op_Minus,_)::rst -> let t, rst = parse_factor rst in
+                                      parse_sum_tick ((false, t)::acc) rst
+             | rst -> acc, rst) in
+        let rec collect t = (function (true,  x)::xs -> E_Plus  (collect t xs, x)
+                                    | (false, x)::xs -> E_Minus (collect t xs, x)
+                                    | [] -> t ) in
+        let t,  rst = parse_factor tkns in
+        let lt, rst = parse_sum_tick [] rst in collect t lt, rst
 
 and parse_eq tkns = let t1, rst1 = parse_sum tkns in match rst1 with
          | (Tk_EqEq,_)::rst1 -> let t2, rst = parse_eq rst1 in E_EqEq (t1, t2), rst
@@ -535,6 +546,14 @@ let fst_plus a b = match a, b with
                        else raise OutOfRange
                      | _,_ -> raise UnexpectedArguments
 
+let fst_minus a b = match a, b with
+                     | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
+                       let w = 1 + if w1 > w2 then w1 else w2 in
+                       let r = 1 lsl w - 1 in (* this is wrong: take xs into account *)
+                       if w <= Sys.int_size then V_FourState (w, r, (v1 - v2) land r)
+                       else raise OutOfRange
+                     | _,_ -> raise UnexpectedArguments
+
 let fst_mul a b = match a, b with
                      | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
                        let w = w1 + w2 in
@@ -613,6 +632,7 @@ let rec eval_expr env = function
   | E_Variable s     -> ( try hfind env.values s with
                           Not_found -> raise (Not_declared s) )
   | E_Plus   (a,b) -> fst_plus   (eval_expr env a) (eval_expr env b)
+  | E_Minus  (a,b) -> fst_minus  (eval_expr env a) (eval_expr env b)
   | E_Mul    (a,b) -> fst_mul    (eval_expr env a) (eval_expr env b)
   | E_BinAnd (a,b) -> fst_binand (eval_expr env a) (eval_expr env b)
   | E_BinOr  (a,b) -> fst_binor  (eval_expr env a) (eval_expr env b)
@@ -652,7 +672,9 @@ let rec eval_constexpr_int = function
    | E_Based_D _ as i -> fst_val (fst_from_literal i)
    | E_Based_O _ as i -> fst_val (fst_from_literal i)
    | E_Based_B _ as i -> fst_val (fst_from_literal i)
-   | E_Plus (e1, e2) -> (eval_constexpr_int e1) + (eval_constexpr_int e2)
+   | E_Plus  (e1, e2) -> (eval_constexpr_int e1) + (eval_constexpr_int e2)
+   | E_Minus (e1, e2) -> (eval_constexpr_int e1) - (eval_constexpr_int e2)
+   | E_Mul   (e1, e2) -> (eval_constexpr_int e1) * (eval_constexpr_int e2)
    | _ -> raise NonConstExpr
 
 let sizeof env s = match hfind env.ranges s with
@@ -682,16 +704,17 @@ let populate_symtable ents =
     List.iter (fun d -> add_multiple d) decls ; env
 
 let rec expr_deps = function
-    | E_Plus (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
-    | E_Mul  (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
-    | E_Variable s    -> [s]
-    | E_String  _     -> []
-    | E_Unbased _     -> []
-    | E_Builtin _     -> []
-    | E_Based_H _     -> []
-    | E_Based_D _     -> []
-    | E_Based_O _     -> []
-    | E_Based_B _     -> []
+    | E_Plus  (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
+    | E_Minus (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
+    | E_Mul   (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
+    | E_Variable s     -> [s]
+    | E_String  _      -> []
+    | E_Unbased _      -> []
+    | E_Builtin _      -> []
+    | E_Based_H _      -> []
+    | E_Based_D _      -> []
+    | E_Based_O _      -> []
+    | E_Based_B _      -> []
     | E_Range (e1,e2,e3) -> (expr_deps e1) @ (expr_deps e2) @ (expr_deps e3)
     | E_Index   (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
     | E_Concat  (el)     -> List.concat (lmap expr_deps el)
@@ -713,6 +736,7 @@ type instr = I_Read of string
            | I_Event of event list
            | I_Clear of string list
            | I_Plus
+           | I_Minus
            | I_Mul
            | I_BinAnd
            | I_BinOr
@@ -773,6 +797,7 @@ let rec compile_expr expr =
   | E_String s           -> [I_Literal (V_String s) ]
   | E_Variable s         -> [I_Read s]
   | E_Plus   (a,b)       -> binop a b I_Plus
+  | E_Minus  (a,b)       -> binop a b I_Minus
   | E_Mul    (a,b)       -> binop a b I_Mul
   | E_BinAnd (a,b)       -> binop a b I_BinAnd
   | E_BinOr  (a,b)       -> binop a b I_BinOr
@@ -850,6 +875,7 @@ let run_instr ps =
     | I_Literal v     -> push_dstk v ps; pc_incr ps
     | I_EqEq          -> binop fst_eqeq
     | I_Plus          -> binop fst_plus
+    | I_Minus         -> binop fst_minus
     | I_Mul           -> binop fst_mul
     | I_BinAnd        -> binop fst_binand
     | I_BinOr         -> binop fst_binor
