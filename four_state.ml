@@ -6,23 +6,54 @@ let code = Char.code
 type veri_value =  V_FourState of int*int*int
                  | V_String of string
 
+type fst_bit = V0 | V1 | VX | VZ
+
 exception NoParse of string
 exception UnexpectedArguments
 exception OutOfRange
 exception NoWay
 
+let get_fst_bit idx = function
+     | V_String _ -> VX
+     | V_FourState (l,r,v) -> ( match 1 land (r lsr idx), 1 land (v lsr idx) with
+         | 0, 0 -> VX
+         | 1, 0 -> V0
+         | 1, 1 -> V1
+         | _, _ -> VZ )
+
 let fst_display = function
    | V_String s -> s
-   | V_FourState (w,r,v) ->
+   | V_FourState (w,_,_) as f ->
     let str = ref "" in
     for i = 0 to w - 1 do
-        match (1 land (r lsr i), 1 land (v lsr i)) with
-           | 0,0 -> str := "x" ^ !str
-           | 0,1 -> str := "z" ^ !str
-           | 1,0 -> str := "0" ^ !str
-           | 1,1 -> str := "1" ^ !str
-           | _ -> raise NoWay
+        match get_fst_bit i f with
+           | VX -> str := "x" ^ !str
+           | VZ -> str := "z" ^ !str
+           | V0 -> str := "0" ^ !str
+           | V1 -> str := "1" ^ !str
     done ; !str
+
+let fst_posedge a b = match a, b with
+     | (V_FourState _ as a) , (V_FourState _ as b) -> 
+         (match get_fst_bit 0 a, get_fst_bit 0 b with
+            | V0, V1 -> true
+            | V0, VX -> true
+            | V0, VZ -> true
+            | VX, V1 -> true
+            | VZ, V1 -> true
+            | _,  _  -> false )
+     | _ -> false
+
+let fst_negedge a b = match a, b with
+     | (V_FourState _ as a) , (V_FourState _ as b) -> 
+         (match get_fst_bit 0 a, get_fst_bit 0 b with
+            | V1, V0 -> true
+            | V1, VX -> true
+            | V1, VZ -> true
+            | VX, V0 -> true
+            | VZ, V0 -> true
+            | _,  _  -> false )
+     | _ -> false
 
 let fst_display_dec = function
    | V_String s -> s

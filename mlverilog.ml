@@ -52,6 +52,23 @@ let rec eval_expr env = function
   | E_Unary (Uop_And, a) -> fst_unand (eval_expr env a)
   | _ -> raise (NoEval "Unsupported expr :(")
 
+(* overrides a single variable, used for edge detection *)
+let rec eval_expr_with env var v = function
+  | E_Variable s     -> ( if s == var then v else
+                          try hfind env.values s with
+                          Not_found -> raise (Not_declared s) )
+  | E_Plus   (a,b) -> fst_plus   (eval_expr_with env var v a) (eval_expr_with env var v b)
+  | E_Minus  (a,b) -> fst_minus  (eval_expr_with env var v a) (eval_expr_with env var v b)
+  | E_Mul    (a,b) -> fst_mul    (eval_expr_with env var v a) (eval_expr_with env var v b)
+  | E_BinAnd (a,b) -> fst_binand (eval_expr_with env var v a) (eval_expr_with env var v b)
+  | E_BinOr  (a,b) -> fst_binor  (eval_expr_with env var v a) (eval_expr_with env var v b)
+  | E_BinXor (a,b) -> fst_binxor (eval_expr_with env var v a) (eval_expr_with env var v b)
+  | E_Unary (Uop_Inv, a) -> fst_uninv (eval_expr_with env var v a)
+  | E_Unary (Uop_Or,  a) -> fst_unor  (eval_expr_with env var v a)
+  | E_Unary (Uop_Xor, a) -> fst_unxor (eval_expr_with env var v a)
+  | E_Unary (Uop_And, a) -> fst_unand (eval_expr_with env var v a)
+  | other -> eval_expr env other
+
 let eval_builtin s lst = match s with
   | "display" -> print_endline ("DISPLAY: " ^ (sconcat ", " (List.map fst_display_dec lst)))
   | "finish"  -> print_endline "FINISH: called"
@@ -234,6 +251,18 @@ let rec compile_stmt = function
    | S_Delay (d, stmt) -> [I_Delay d] @ (compile_stmt stmt)
    | S_EvControl (el, stmt) -> [I_Event el; I_Clear (event_deps el)] @ (compile_stmt stmt)
    | _ -> raise (NoEval "Unsupported stmt for compilation :(")
+
+type trig_edge = PosEdge | NegEdge | AnyEdge
+
+type event_trigger = Trigger of int * trig_edge * expr
+
+let check_hook ps var old_val (Trigger(_, edg, exp))
+    = let new_val = eval_expr      ps.env             exp in
+      let old_val = eval_expr_with ps.env var old_val exp in
+      match edg with
+      | AnyEdge -> new_val != old_val
+      | PosEdge -> fst_posedge old_val new_val
+      | NegEdge -> fst_negedge old_val new_val
 
 let add_hook ps s = match Hashtbl.find_opt ps.env.hooks s with
                       | Some lst -> Hashtbl.replace ps.env.hooks s (ps.pid::lst)

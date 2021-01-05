@@ -6,7 +6,7 @@ mlverilog: mlverilog.cmo lex_and_parse.cmo four_state.cmo
 	ocamlc -o mlverilog lex_and_parse.cmo four_state.cmo mlverilog.cmo
 
 four_state.cmi: four_state.cmo
-four_state.cmo: lex_and_parse.mli
+four_state.cmo: lex_and_parse.mli four_state.ml
 	ocamlc -c four_state.ml
 
 lex_and_parse.cmo: lex_and_parse.ml
