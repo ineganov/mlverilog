@@ -1,4 +1,4 @@
-read_netlist
-read_netlist.cmi
-read_netlist.cmo
-read_netlist.cmx
+mlverilog
+*.cmi
+*.cmo
+*.cmx
