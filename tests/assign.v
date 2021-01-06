@@ -12,8 +12,8 @@ always #1 clk = ~clk;
 
 always @(posedge clk) cnt = next_cnt;
 
-//always @(posedge done) $finish(); // consider @(done === 1'b1)
-initial #20 $finish();
+always @(posedge done == 1'b1) $finish(); // consider @(done === 1'b1)
+//initial #20 $finish();
 
 always @cnt $display("--> cnt: ", cnt, " done: ", done, " time: ", $time);
 

@@ -21,11 +21,14 @@ exception Yield
 exception Done
 exception StackUnderflow
 
+type trig_edge = PosEdge | NegEdge | AnyEdge
+
+type event_trigger = Trigger of int * trig_edge * expr
 
 type process_env = { kinds  : (string, decl_kind ) Hashtbl.t ;
                      ranges : (string, ioreg_decl) Hashtbl.t ;
                      values : (string, veri_value) Hashtbl.t ;
-                     hooks  : (string, int list) Hashtbl.t   ;
+                     hooks  : (string, event_trigger list) Hashtbl.t   ;
              mutable unblk  : int list }
 
 let hvalue env s   = try hfind env.values s with Not_found -> raise (Not_declared s)
@@ -45,6 +48,7 @@ let rec eval_expr env = function
   | E_Mul    (a,b) -> fst_mul    (eval_expr env a) (eval_expr env b)
   | E_BinAnd (a,b) -> fst_binand (eval_expr env a) (eval_expr env b)
   | E_BinOr  (a,b) -> fst_binor  (eval_expr env a) (eval_expr env b)
+  | E_EqEq   (a,b) -> fst_eqeq   (eval_expr env a) (eval_expr env b)
   | E_BinXor (a,b) -> fst_binxor (eval_expr env a) (eval_expr env b)
   | E_Unary (Uop_Inv, a) -> fst_uninv (eval_expr env a)
   | E_Unary (Uop_Or,  a) -> fst_unor  (eval_expr env a)
@@ -54,7 +58,7 @@ let rec eval_expr env = function
 
 (* overrides a single variable, used for edge detection *)
 let rec eval_expr_with env var v = function
-  | E_Variable s     -> ( if s == var then v else
+  | E_Variable s     -> ( if s = var then v else
                           try hfind env.values s with
                           Not_found -> raise (Not_declared s) )
   | E_Plus   (a,b) -> fst_plus   (eval_expr_with env var v a) (eval_expr_with env var v b)
@@ -62,6 +66,7 @@ let rec eval_expr_with env var v = function
   | E_Mul    (a,b) -> fst_mul    (eval_expr_with env var v a) (eval_expr_with env var v b)
   | E_BinAnd (a,b) -> fst_binand (eval_expr_with env var v a) (eval_expr_with env var v b)
   | E_BinOr  (a,b) -> fst_binor  (eval_expr_with env var v a) (eval_expr_with env var v b)
+  | E_EqEq   (a,b) -> fst_eqeq   (eval_expr_with env var v a) (eval_expr_with env var v b)
   | E_BinXor (a,b) -> fst_binxor (eval_expr_with env var v a) (eval_expr_with env var v b)
   | E_Unary (Uop_Inv, a) -> fst_uninv (eval_expr_with env var v a)
   | E_Unary (Uop_Or,  a) -> fst_unor  (eval_expr_with env var v a)
@@ -252,29 +257,35 @@ let rec compile_stmt = function
    | S_EvControl (el, stmt) -> [I_Event el; I_Clear (event_deps el)] @ (compile_stmt stmt)
    | _ -> raise (NoEval "Unsupported stmt for compilation :(")
 
-type trig_edge = PosEdge | NegEdge | AnyEdge
-
-type event_trigger = Trigger of int * trig_edge * expr
-
 let check_hook ps var old_val (Trigger(_, edg, exp))
     = let new_val = eval_expr      ps.env             exp in
       let old_val = eval_expr_with ps.env var old_val exp in
+      printf "%s -> %s\n" (fst_display old_val) (fst_display new_val) ;
       match edg with
       | AnyEdge -> new_val != old_val
       | PosEdge -> fst_posedge old_val new_val
       | NegEdge -> fst_negedge old_val new_val
 
-let add_hook ps s = match Hashtbl.find_opt ps.env.hooks s with
-                      | Some lst -> Hashtbl.replace ps.env.hooks s (ps.pid::lst)
-                      | None     -> Hashtbl.add ps.env.hooks s [ps.pid]
+let add_hook ps s hooks = match Hashtbl.find_opt ps.env.hooks s with
+                | Some lst -> Hashtbl.replace ps.env.hooks s (hooks @ lst)
+                | None     -> Hashtbl.add ps.env.hooks s hooks
 
-let unblock_theads ps s = match Hashtbl.find_opt ps.env.hooks s with
-    | None     -> ()
-    | Some lst -> printf "PID %d: unblocking %s\n" ps.pid (sconcat ", " (lmap string_of_int lst));
-                  ps.env.unblk <- lst @ ps.env.unblk
+let make_triggers pid el = let trg =
+    function Posedge e -> Trigger (pid, PosEdge, e)
+           | Negedge e -> Trigger (pid, NegEdge, e)
+           | Level   e -> Trigger (pid, AnyEdge, e) in lmap trg el
+
+let unblock_theads ps s old_val =
+    let f_s = function Trigger (p,_,_) -> string_of_int p in
+    let f_i = function Trigger (p,_,_) -> p in
+        match Hashtbl.find_opt ps.env.hooks s with
+        | None     -> ()
+        | Some lst -> let unblk_lst = lfilter (fun h -> check_hook ps s old_val h) lst in
+                      printf "PID %d: unblocking %s\n" ps.pid (sconcat ", " (lmap f_s unblk_lst));
+                      ps.env.unblk <- (lmap f_i unblk_lst) @ ps.env.unblk
 
 let clear_hook ps lst =
-    let not_l pid = pid != ps.pid in
+    let not_l = function Trigger (p,_,_) -> p != ps.pid in
     let iter s = ( match Hashtbl.find_opt ps.env.hooks s with
                     | Some lst -> Hashtbl.replace ps.env.hooks s (lfilter not_l lst)
                     | None -> () ) in
@@ -293,8 +304,8 @@ let run_instr ps =
     | I_Write s       -> let tos  = pop_dstk ps in
                          let prev = hvalue ps.env s in
                          printf "PID %d: writing %d to %s\n" ps.pid (fst_val tos) s ;
-                         if prev != tos then unblock_theads ps s;
                          hreplace ps.env s tos;
+                         unblock_theads ps s prev; (* this does posedge/negedge/expr checks *)
                          pc_incr ps
     | I_Resize s      -> let tos = pop_dstk ps     in
                          let sz  = sizeof ps.env s in
@@ -303,9 +314,10 @@ let run_instr ps =
     | I_Delay d       -> pc_incr ps;
                          ps.status <- Stts_Delay (d + !(ps.time));
                          raise Yield
-    | I_Event el      -> let add_hooks_here = event_deps el in
+    | I_Event el      -> let add_hooks_here = event_deps el     in
+                         let triggers = make_triggers ps.pid el in
                          printf "PID %d: adding hooks to: %s\n" ps.pid (String.concat "," add_hooks_here);
-                         List.iter (fun s -> add_hook ps s) add_hooks_here ;
+                         List.iter (fun s -> add_hook ps s triggers) add_hooks_here ;
                          pc_incr ps;
                          ps.status <- Stts_Event el;
                          raise Yield
