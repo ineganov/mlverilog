@@ -102,7 +102,11 @@ let fst_from_literal = function
    | _ -> raise NoWay
 
 let fst_val = function V_FourState (_,_,v) -> v
-                     | V_String _ -> (-2)
+                     | V_String _ -> raise UnexpectedArguments
+
+let fst_is_real v = match v with
+    | V_FourState (w,r,_) -> r == 1 lsl w - 1
+    | V_String _ -> true
 
 let fst_resize v sz = match v with
     | V_String v -> V_String v
@@ -192,3 +196,11 @@ let fst_unand = function V_FourState (w,r,v) -> let r_r = ref 1 in
                                                 done;
                                                 V_FourState (1, !r_r, !r_v)
                       | _ -> raise UnexpectedArguments
+
+let fst_idx v msb lsb i = match v with
+   |  V_FourState (w,r,v) ->
+      let idx = if msb >= lsb then fst_val i - lsb else lsb - fst_val i in
+      if idx >= 0 && idx < w && fst_is_real i
+         then V_FourState (1, 1 land (r lsr idx), 1 land (v lsr idx))
+         else V_FourState (1, 0, 0)
+   | _ -> raise UnexpectedArguments

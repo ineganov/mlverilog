@@ -20,6 +20,7 @@ exception NotImplemented of string
 exception Yield
 exception Done
 exception StackUnderflow
+exception IllegalScalarIndex
 
 type trig_edge = PosEdge | NegEdge | AnyEdge
 
@@ -75,8 +76,8 @@ let rec eval_expr_with env var v = function
   | other -> eval_expr env other
 
 let eval_builtin s lst = match s with
-  | "display" -> print_endline ("DISPLAY: " ^ (sconcat ", " (List.map fst_display_dec lst)))
-  | "finish"  -> print_endline "FINISH: called"
+  | "display" -> print_endline (sconcat "" (List.map fst_display lst))
+  | "finish"  -> print_endline "Finish called"
   | e -> raise (NoEval ("Unsupported builtin: " ^ e))
 
 let print_symtable env =
@@ -110,7 +111,17 @@ let rec eval_constexpr_int = function
 
 let sizeof env s = match hfind env.ranges s with
                    | Single -> 1
-                   | Range (e1, e2) -> (eval_constexpr_int e1) - (eval_constexpr_int e2) + 1
+                   | Range (e1, e2) -> let msb = eval_constexpr_int e1 in
+                                       let lsb = eval_constexpr_int e2 in
+                                       if(msb >= lsb) then msb - lsb + 1
+                                       else                lsb - msb + 1
+
+let norm_idx env s i = match hfind env.ranges s with
+                   | Single -> raise IllegalScalarIndex
+                   | Range (e1,e2) -> let msb = eval_constexpr_int e1 in
+                                      let lsb = eval_constexpr_int e2 in
+                                      if(msb >= lsb) then i - lsb
+                                      else                lsb - i
 
 let all_zs = function
     | Range (e1, e2) -> let msb = match eval_constexpr e1 with
@@ -238,8 +249,7 @@ let rec compile_expr expr =
   | E_Unary (Uop_Or,  a) -> uop a I_UnOr
   | E_Unary (Uop_Xor, a) -> uop a I_UnXor
   | E_Unary (Uop_And, a) -> uop a I_UnAnd
-  | E_Index (E_Variable a, e) -> [ I_Literal (eval_constexpr e);
-                                   I_Index a ]
+  | E_Index (E_Variable a, e) -> (compile_expr e) @ [I_Index a ]
   | E_Index _            -> raise (NotImplemented "Index must be variable based")
   | E_Range _            -> raise (NotImplemented "Ranges not implemented")
   | E_Concat _           -> raise (NotImplemented "Concats not implemented")
@@ -334,7 +344,16 @@ let run_instr ps =
     | I_UnOr          -> uop   fst_unor
     | I_UnAnd         -> uop   fst_unand
     | I_UnXor         -> uop   fst_unxor
-    | I_Index s       -> raise (NotImplemented "I_Index")
+    | I_Index s       -> ( match hfind ps.env.ranges s with
+                            | Single -> raise IllegalScalarIndex
+                            | Range (e1,e2) -> 
+                                let msb = eval_constexpr_int e1 in
+                                let lsb = eval_constexpr_int e2 in
+                                let v   = hfind ps.env.values s in
+                                let i   = pop_dstk ps           in
+                                let ret = fst_idx v msb lsb i   in
+                                push_dstk ret ps;
+                                pc_incr       ps )
     | I_Builtin (s,l) -> let lst = pop_dstk_n l ps in eval_builtin s lst ; pc_incr ps
     | I_Restart       -> ps.pc <- 0 ; ps.dstack <- []
     | I_Halt          -> ps.status <- Stts_Halt; raise Yield
