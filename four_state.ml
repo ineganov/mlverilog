@@ -204,3 +204,12 @@ let fst_idx v msb lsb i = match v with
          then V_FourState (1, 1 land (r lsr idx), 1 land (v lsr idx))
          else V_FourState (1, 0, 0)
    | _ -> raise UnexpectedArguments
+
+let fst_rng v msb lsb m l = match v with
+   |  V_FourState (w,r,v) ->
+      let i1 = if msb >= lsb then m - lsb else lsb - m in
+      let i2 = if msb >= lsb then l - lsb else lsb - l in
+      let wr   = i1 - i2 + 1                                           in
+      let wmsk = 1 lsl wr - 1                                          in
+      V_FourState (wr, wmsk land (r lsr i2), wmsk land (v lsr i2))
+   | _ -> raise UnexpectedArguments

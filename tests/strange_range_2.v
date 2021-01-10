@@ -12,6 +12,7 @@ initial begin
     i = 5;
     $display("Idx a[0], b[0], c[3]: ", a[0], b[0], c[3]);
     $display("Idx c[3..7]: ", c[3], c[4], c[5], c[i+1], c[7]);
+    $display("Range a[2:1] b[2:1]", a[2:1], b[1:2]);
     $finish();
     end
 

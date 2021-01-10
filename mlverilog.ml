@@ -21,6 +21,7 @@ exception Yield
 exception Done
 exception StackUnderflow
 exception IllegalScalarIndex
+exception ReversedRange
 
 type trig_edge = PosEdge | NegEdge | AnyEdge
 
@@ -189,6 +190,7 @@ type instr = I_Read of string
            | I_UnAnd
            | I_UnXor
            | I_Index of string
+           | I_Range of string * int * int
            | I_Builtin of string * int
            | I_Restart
            | I_Halt
@@ -251,7 +253,10 @@ let rec compile_expr expr =
   | E_Unary (Uop_And, a) -> uop a I_UnAnd
   | E_Index (E_Variable a, e) -> (compile_expr e) @ [I_Index a ]
   | E_Index _            -> raise (NotImplemented "Index must be variable based")
-  | E_Range _            -> raise (NotImplemented "Ranges not implemented")
+  | E_Range (E_Variable s, e1, e2) ->
+                         let msb = eval_constexpr_int e1 in
+                         let lsb = eval_constexpr_int e2 in [I_Range (s,msb,lsb) ]
+  | E_Range _            -> raise (NotImplemented "Range must be variable based")
   | E_Concat _           -> raise (NotImplemented "Concats not implemented")
   | E_Builtin "time"     -> [I_Time]
   | E_Builtin _          -> raise (NotImplemented "Only $time is allowed in expressions")
@@ -352,6 +357,17 @@ let run_instr ps =
                                 let v   = hfind ps.env.values s in
                                 let i   = pop_dstk ps           in
                                 let ret = fst_idx v msb lsb i   in
+                                push_dstk ret ps;
+                                pc_incr       ps )
+    | I_Range (s,m,l) -> ( match hfind ps.env.ranges s with
+                            | Single -> raise IllegalScalarIndex 
+                            | Range (e1,e2) ->   
+                                let msb = eval_constexpr_int e1 in
+                                let lsb = eval_constexpr_int e2 in
+                                let v   = hfind ps.env.values s in
+                                let ret = fst_rng v msb lsb m l in
+                                if msb >= lsb && m < l then raise ReversedRange;
+                                if msb <  lsb && m > l then raise ReversedRange;
                                 push_dstk ret ps;
                                 pc_incr       ps )
     | I_Builtin (s,l) -> let lst = pop_dstk_n l ps in eval_builtin s lst ; pc_incr ps
