@@ -63,3 +63,5 @@ val snd          : 'a * 'b -> 'b
 val tokenize     : string -> (token * int) list
 val parse_expr   : (token * int) list -> expr * (token * int) list
 val parse_module : (token * int) list -> module_def * (token * int) list
+val parse_modules : module_def list -> (token * int) list -> module_def list
+val read_in       : string list -> (string, module_def) Hashtbl.t

@@ -9,7 +9,7 @@ module Blah(a,b,c);
 
     always @(posedge clk, negedge reset) begin
            #40
-           {w,e} = 4;
+           w = 4;
            if(a) b = 1;
            if(b) c = 1; else d = 1;
            qwer = 1'b1;
@@ -20,6 +20,13 @@ module Blah(a,b,c);
                          .y({a,b,3+2}) ) ;
 
     assign a = b;
-    assign {q,w,e} = 4+1;
+    // assign {q,w,e} = 4+1; // --> complex lvalues not supported
 
+endmodule
+
+module Urgh(q,w,e);
+    input        q, w;
+    output [1:0] e;
+
+    assign e = {q,w};
 endmodule

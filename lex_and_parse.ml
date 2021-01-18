@@ -450,3 +450,14 @@ let parse_module = function
 
   | e -> raise (NoParse (parse_error "module module <module_name>" e))
 
+let rec parse_modules acc =
+    function | []   -> lrev acc
+             | tkns -> let m, rst = parse_module tkns in parse_modules (m::acc) rst
+
+let read_in flist =
+    let pm p   = try parse_modules [] (tokenize p)
+                 with e -> Printf.printf "in file <%s>: " p ; raise e in
+    let mds    = List.concat    (List.map pm flist) in
+    let htbl   = Hashtbl.create (List.length mds)   in
+    let hadd h = function Module (nm,_,_) as m -> Hashtbl.add h nm m in
+    List.iter (fun m -> hadd htbl m) mds ; htbl
