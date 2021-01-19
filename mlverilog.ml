@@ -3,6 +3,7 @@ open Four_state
 
 let printf      = Printf.printf
 let lmap        = List.map
+let lconcat     = List.concat
 let lsort       = List.sort
 let lfilter     = List.filter
 let lfilter_map = List.filter_map
@@ -191,6 +192,7 @@ type instr = I_Read of string
            | I_UnXor
            | I_Index of string
            | I_Range of string * int * int
+           | I_Concat of int
            | I_Builtin of string * int
            | I_Restart
            | I_Halt
@@ -247,6 +249,7 @@ let rec compile_expr expr =
   | E_BinOr  (a,b)       -> binop a b I_BinOr
   | E_BinXor (a,b)       -> binop a b I_BinXor
   | E_EqEq   (a,b)       -> binop a b I_EqEq
+  | E_Concat lst         -> (lconcat (lmap compile_expr lst)) @ [I_Concat (List.length lst)]
   | E_Unary (Uop_Inv, a) -> uop a I_UnInv
   | E_Unary (Uop_Or,  a) -> uop a I_UnOr
   | E_Unary (Uop_Xor, a) -> uop a I_UnXor
@@ -257,7 +260,6 @@ let rec compile_expr expr =
                          let msb = eval_constexpr_int e1 in
                          let lsb = eval_constexpr_int e2 in [I_Range (s,msb,lsb) ]
   | E_Range _            -> raise (NotImplemented "Range must be variable based")
-  | E_Concat _           -> raise (NotImplemented "Concats not implemented")
   | E_Builtin "time"     -> [I_Time]
   | E_Builtin _          -> raise (NotImplemented "Only $time is allowed in expressions")
 
@@ -337,6 +339,12 @@ let run_instr ps =
                          ps.status <- Stts_Event el;
                          raise Yield
     | I_Clear el_s    -> clear_hook ps el_s; pc_incr ps
+    | I_Concat n      -> let lst = ref [] in
+                         for i = 1 to n do
+                            lst := (pop_dstk ps) :: !lst
+                         done;
+                         push_dstk (fst_concat_lst !lst) ps;
+                         pc_incr ps
     | I_Literal v     -> push_dstk v ps; pc_incr ps
     | I_EqEq          -> binop fst_eqeq
     | I_Plus          -> binop fst_plus

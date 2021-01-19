@@ -213,3 +213,16 @@ let fst_rng v msb lsb m l = match v with
       let wmsk = 1 lsl wr - 1                                          in
       V_FourState (wr, wmsk land (r lsr i2), wmsk land (v lsr i2))
    | _ -> raise UnexpectedArguments
+
+let fst_concat v1 v2 = match v1, v2 with
+   | V_String s1,             V_String s2           -> V_String (s1 ^ s2)
+   | V_FourState (w1,r1,v1), V_FourState (w2,r2,v2) ->
+      if w1 + w2 <= Sys.int_size then V_FourState (w1+w2,
+                                                   (r1 lsl w2) lor r2,
+                                                   (v1 lsl w2) lor v2 )
+                                 else raise OutOfRange
+   | _, _ -> raise UnexpectedArguments
+
+let fst_concat_lst lst = match lst with
+   | []    -> raise UnexpectedArguments
+   | x::xs -> List.fold_left fst_concat x xs
