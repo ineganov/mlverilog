@@ -32,7 +32,8 @@ type process_env = { kinds  : (string, decl_kind ) Hashtbl.t ;
                      ranges : (string, ioreg_decl) Hashtbl.t ;
                      values : (string, veri_value) Hashtbl.t ;
                      hooks  : (string, event_trigger list) Hashtbl.t   ;
-             mutable unblk  : int list }
+             mutable unblk  : int list ;
+             mutable time   : int }
 
 let hvalue env s   = try hfind env.values s with Not_found -> raise (Not_declared s)
 let hreplace env s v = try hreplace env.values s v with Not_found -> raise (Not_declared s)
@@ -139,9 +140,10 @@ let mk_symtable = { kinds  = Hashtbl.create 100;
                     ranges = Hashtbl.create 100;
                     values = Hashtbl.create 100;
                     hooks  = Hashtbl.create 100;
-                    unblk  = [] }
+                    unblk  = [];
+                    time   = 0 }
 
-let populate_symtable env ents =
+let populate_symtable env (Module (_,_,ents)) =
     let decls = lfilter_map (function Decl (k,r,lst) -> Some (k,r,lst) | _ -> None) ents in
     let add_multiple (k,r,lst) = List.iter (fun s -> hadd env.kinds  s k;
                                                      hadd env.ranges s r;
@@ -211,17 +213,13 @@ type process_state = { mutable status : process_status;
                        mutable pc     : int;
                        mutable dstack : veri_value list;
                                instrs : instr array ;
-                               pid    : int ;
-                               env    : process_env ;
-                               time   : int ref  }
+                               pid    : int }
 
-let init_pstate p ii e t = {  status = Stts_Ready;
-                              pc = 0;
-                              dstack = [];
-                              instrs = Array.of_list ii;
-                              pid = p;
-                              env = e;
-                              time = t }
+let init_pstate p ii = {  status = Stts_Ready;
+                          pc = 0;
+                          dstack = [];
+                          instrs = Array.of_list ii;
+                          pid = p }
 
 let push_dstk v pstate = pstate.dstack <- v::pstate.dstack
 let pop_dstk pstate = try (let v = hd pstate.dstack in
@@ -275,41 +273,41 @@ let rec compile_stmt = function
    | S_EvControl (el, stmt) -> [I_Event el; I_Clear (event_deps el)] @ (compile_stmt stmt)
    | _ -> raise (NoEval "Unsupported stmt for compilation :(")
 
-let check_hook ps var old_val (Trigger(_, edg, exp))
-    = let new_val = eval_expr      ps.env             exp in
-      let old_val = eval_expr_with ps.env var old_val exp in
+let check_hook env var old_val (Trigger(_, edg, exp))
+    = let new_val = eval_expr      env             exp in
+      let old_val = eval_expr_with env var old_val exp in
       printf "%s -> %s\n" (fst_display old_val) (fst_display new_val) ;
       match edg with
       | AnyEdge -> new_val != old_val
       | PosEdge -> fst_posedge old_val new_val
       | NegEdge -> fst_negedge old_val new_val
 
-let add_hook ps s hooks = match Hashtbl.find_opt ps.env.hooks s with
-                | Some lst -> Hashtbl.replace ps.env.hooks s (hooks @ lst)
-                | None     -> Hashtbl.add ps.env.hooks s hooks
+let add_hook env s hooks = match Hashtbl.find_opt env.hooks s with
+                | Some lst -> Hashtbl.replace env.hooks s (hooks @ lst)
+                | None     -> Hashtbl.add env.hooks s hooks
 
 let make_triggers pid el = let trg =
     function Posedge e -> Trigger (pid, PosEdge, e)
            | Negedge e -> Trigger (pid, NegEdge, e)
            | Level   e -> Trigger (pid, AnyEdge, e) in lmap trg el
 
-let unblock_theads ps s old_val =
+let unblock_theads env pid s old_val =
     let f_s = function Trigger (p,_,_) -> string_of_int p in
     let f_i = function Trigger (p,_,_) -> p in
-        match Hashtbl.find_opt ps.env.hooks s with
+        match Hashtbl.find_opt env.hooks s with
         | None     -> ()
-        | Some lst -> let unblk_lst = lfilter (fun h -> check_hook ps s old_val h) lst in
-                      printf "PID %d: unblocking %s\n" ps.pid (sconcat ", " (lmap f_s unblk_lst));
-                      ps.env.unblk <- (lmap f_i unblk_lst) @ ps.env.unblk
+        | Some lst -> let unblk_lst = lfilter (fun h -> check_hook env s old_val h) lst in
+                      printf "PID %d: unblocking %s\n" pid (sconcat ", " (lmap f_s unblk_lst));
+                      env.unblk <- (lmap f_i unblk_lst) @ env.unblk
 
-let clear_hook ps lst =
-    let not_l = function Trigger (p,_,_) -> p != ps.pid in
-    let iter s = ( match Hashtbl.find_opt ps.env.hooks s with
-                    | Some lst -> Hashtbl.replace ps.env.hooks s (lfilter not_l lst)
+let clear_hook env pid lst =
+    let not_l = function Trigger (p,_,_) -> p != pid in
+    let iter s = ( match Hashtbl.find_opt env.hooks s with
+                    | Some lst -> Hashtbl.replace env.hooks s (lfilter not_l lst)
                     | None -> () ) in
     List.iter iter lst
 
-let run_instr ps =
+let run_instr env ps =
     let inst     = ps.instrs.(ps.pc)  in
     let binop fn = ( let a = pop_dstk ps in
                      let b = pop_dstk ps in
@@ -318,28 +316,28 @@ let run_instr ps =
                      push_dstk (fn a) ps; pc_incr ps )   in
 
     match inst with
-    | I_Read  s       -> push_dstk (hvalue ps.env s) ps; pc_incr ps;
+    | I_Read  s       -> push_dstk (hvalue env s) ps; pc_incr ps;
     | I_Write s       -> let tos  = pop_dstk ps in
-                         let prev = hvalue ps.env s in
+                         let prev = hvalue env s in
                          printf "PID %d: writing %d to %s\n" ps.pid (fst_val tos) s ;
-                         hreplace ps.env s tos;
-                         unblock_theads ps s prev; (* this does posedge/negedge/expr checks *)
+                         hreplace env s tos;
+                         unblock_theads env ps.pid s prev; (* this does posedge/negedge/expr checks *)
                          pc_incr ps
     | I_Resize s      -> let tos = pop_dstk ps     in
-                         let sz  = sizeof ps.env s in
+                         let sz  = sizeof env s in
                          push_dstk (fst_resize tos sz) ps;
                          pc_incr ps;
     | I_Delay d       -> pc_incr ps;
-                         ps.status <- Stts_Delay (d + !(ps.time));
+                         ps.status <- Stts_Delay (d + env.time);
                          raise Yield
     | I_Event el      -> let add_hooks_here = event_deps el     in
                          let triggers = make_triggers ps.pid el in
                          printf "PID %d: adding hooks to: %s\n" ps.pid (String.concat "," add_hooks_here);
-                         List.iter (fun s -> add_hook ps s triggers) add_hooks_here ;
+                         List.iter (fun s -> add_hook env s triggers) add_hooks_here ;
                          pc_incr ps;
                          ps.status <- Stts_Event el;
                          raise Yield
-    | I_Clear el_s    -> clear_hook ps el_s; pc_incr ps
+    | I_Clear el_s    -> clear_hook env ps.pid el_s; pc_incr ps
     | I_Concat n      -> let lst = ref [] in
                          for i = 1 to n do
                             lst := (pop_dstk ps) :: !lst
@@ -358,22 +356,22 @@ let run_instr ps =
     | I_UnOr          -> uop   fst_unor
     | I_UnAnd         -> uop   fst_unand
     | I_UnXor         -> uop   fst_unxor
-    | I_Index s       -> ( match hfind ps.env.ranges s with
+    | I_Index s       -> ( match hfind env.ranges s with
                             | Single -> raise IllegalScalarIndex
                             | Range (e1,e2) -> 
                                 let msb = eval_constexpr_int e1 in
                                 let lsb = eval_constexpr_int e2 in
-                                let v   = hfind ps.env.values s in
+                                let v   = hfind env.values s    in
                                 let i   = pop_dstk ps           in
                                 let ret = fst_idx v msb lsb i   in
                                 push_dstk ret ps;
                                 pc_incr       ps )
-    | I_Range (s,m,l) -> ( match hfind ps.env.ranges s with
+    | I_Range (s,m,l) -> ( match hfind env.ranges s with
                             | Single -> raise IllegalScalarIndex 
                             | Range (e1,e2) ->   
                                 let msb = eval_constexpr_int e1 in
                                 let lsb = eval_constexpr_int e2 in
-                                let v   = hfind ps.env.values s in
+                                let v   = hfind env.values s in
                                 let ret = fst_rng v msb lsb m l in
                                 if msb >= lsb && m < l then raise ReversedRange;
                                 if msb <  lsb && m > l then raise ReversedRange;
@@ -383,7 +381,7 @@ let run_instr ps =
     | I_Restart       -> ps.pc <- 0 ; ps.dstack <- []
     | I_Halt          -> ps.status <- Stts_Halt; raise Yield
     | I_Finish        -> ps.status <- Stts_Finish; raise Yield
-    | I_Time          -> push_dstk (V_FourState (Sys.int_size, -1, !(ps.time))) ps ; pc_incr ps
+    | I_Time          -> push_dstk (V_FourState (Sys.int_size, -1, env.time)) ps ; pc_incr ps
 
 let compile_process = function
     | Always  s -> (compile_stmt s) @ [I_Restart]
@@ -400,23 +398,21 @@ let compile_process = function
     | _         -> raise NoWay
 
 let make_process_tab = function Module (_, _, ents) ->
-       let sim_time = ref 0 in
-       let env    = mk_symtable in
+
        let f_ents = lfilter (function
                                     | Always _ | Initial _ | Assign _ -> true
                                     | _ -> false ) ents in
        let pids = List.init (List.length f_ents) (fun f -> f+1) in
        let prcs = lmap  compile_process f_ents                  in
-       populate_symtable env ents;
-       List.map2 (fun n bc -> init_pstate n bc env sim_time) pids prcs
+       List.map2 (fun n bc -> init_pstate n bc) pids prcs
 
-let run_process ps = try while true do run_instr ps done with Yield -> ()
+let run_process env ps = try while true do run_instr env ps done with Yield -> ()
 
 let run_tab p = lmap run_process p
 
-let run_eligible ps_tab =
+let run_eligible env ps_tab =
     let f = function {status = Stts_Ready; _} -> true | _ -> false in
-    List.iter run_process (lfilter f ps_tab)
+    List.iter (fun ps -> run_process env ps) (lfilter f ps_tab)
 
 let rec have_eligible = function
    | {status = Stts_Ready; _} :: rst -> true
@@ -442,28 +438,28 @@ let wake_time n ps_tab =
 let wake_unblock ps_tab lst = (*FIXME: Lame, dude *)
     List.iter (fun pid -> (List.nth ps_tab (pid-1)).status <- Stts_Ready ) lst
 
-let simulate ps_tab =
-    let time = (hd ps_tab).time in
-    let env  = (hd ps_tab).env  in
+let simulate env ps_tab =
     while true do
         if (have_eligible ps_tab) then (
-            run_eligible ps_tab; (* updates unblock list via hooks *)
+            run_eligible env ps_tab; (* updates unblock list via hooks *)
             wake_unblock ps_tab env.unblk;
             env.unblk <- [];
             if (finish_seen ps_tab) then (
-                printf "Finish seen at %d\n" !time ; 
+                printf "Finish seen at %d\n" env.time ; 
                 raise Done
             )
         ) else (
-            let nn = next_time !time ps_tab in 
-            time := nn;
-            printf "Advancing time to %d\n" !time ;
+            let nn = next_time env.time ps_tab in 
+            env.time <- nn;
+            printf "Advancing time to %d\n" env.time ;
             wake_time nn ps_tab
         )
     done
 
 let main path = let m      = fst ( parse_module ( tokenize path ) ) in
+                let env    = mk_symtable in
                 let ps_tab = make_process_tab m in
-                simulate ps_tab ;;
+                populate_symtable env m;
+                simulate env ps_tab ;;
 
 main Sys.argv.(1) ;;
