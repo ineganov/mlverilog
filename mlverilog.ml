@@ -397,8 +397,7 @@ let compile_process = function
     | Assign _  -> raise (NotImplemented "Involved lvalues are not supported")
     | _         -> raise NoWay
 
-let make_process_tab = function Module (_, _, ents) ->
-
+let compile_module (Module (_, _, ents)) =
        let f_ents = lfilter (function
                                     | Always _ | Initial _ | Assign _ -> true
                                     | _ -> false ) ents in
@@ -458,7 +457,7 @@ let simulate env ps_tab =
 
 let main path = let m      = fst ( parse_module ( tokenize path ) ) in
                 let env    = mk_symtable in
-                let ps_tab = make_process_tab m in
+                let ps_tab = compile_module m in
                 populate_symtable env m;
                 simulate env ps_tab ;;
 
