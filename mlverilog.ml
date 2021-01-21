@@ -135,17 +135,18 @@ let all_zs = function
                         let w   = msb - lsb + 1  in V_FourState (w,0,0)
     | Single -> V_FourState (1,0,-1)
 
-let populate_symtable ents =
-    let env   = {kinds  = Hashtbl.create 100;
-                 ranges = Hashtbl.create 100;
-                 values = Hashtbl.create 100;
-                 hooks  = Hashtbl.create 100;
-                 unblk  = [] } in
+let mk_symtable = { kinds  = Hashtbl.create 100;
+                    ranges = Hashtbl.create 100;
+                    values = Hashtbl.create 100;
+                    hooks  = Hashtbl.create 100;
+                    unblk  = [] }
+
+let populate_symtable env ents =
     let decls = lfilter_map (function Decl (k,r,lst) -> Some (k,r,lst) | _ -> None) ents in
     let add_multiple (k,r,lst) = List.iter (fun s -> hadd env.kinds  s k;
                                                      hadd env.ranges s r;
                                                      hadd env.values s (all_zs r);) lst in
-    List.iter (fun d -> add_multiple d) decls ; env
+    List.iter (fun d -> add_multiple d) decls
 
 let rec expr_deps = function
     | E_Plus  (e1, e2) -> (expr_deps e1) @ (expr_deps e2)
@@ -400,13 +401,14 @@ let compile_process = function
 
 let make_process_tab = function Module (_, _, ents) ->
        let sim_time = ref 0 in
-       let d_ents = populate_symtable ents in
-       let f_ents = List.filter (function
+       let env    = mk_symtable in
+       let f_ents = lfilter (function
                                     | Always _ | Initial _ | Assign _ -> true
                                     | _ -> false ) ents in
        let pids = List.init (List.length f_ents) (fun f -> f+1) in
-       let prcs = List.map  compile_process f_ents              in
-       List.map2 (fun n bc -> init_pstate n bc d_ents sim_time) pids prcs
+       let prcs = lmap  compile_process f_ents                  in
+       populate_symtable env ents;
+       List.map2 (fun n bc -> init_pstate n bc env sim_time) pids prcs
 
 let run_process ps = try while true do run_instr ps done with Yield -> ()
 
@@ -414,7 +416,7 @@ let run_tab p = lmap run_process p
 
 let run_eligible ps_tab =
     let f = function {status = Stts_Ready; _} -> true | _ -> false in
-    List.iter run_process (List.filter f ps_tab)
+    List.iter run_process (lfilter f ps_tab)
 
 let rec have_eligible = function
    | {status = Stts_Ready; _} :: rst -> true
