@@ -36,7 +36,39 @@ type process_env = { kinds  : (string, decl_kind ) Hashtbl.t ;
              mutable time   : int }
 
 let hvalue env s   = try hfind env.values s with Not_found -> raise (Not_declared s)
+let hrange env s   = try hfind env.ranges s with Not_found -> raise (Not_declared s)
 let hreplace env s v = try hreplace env.values s v with Not_found -> raise (Not_declared s)
+
+let in_scope s v = if s = "" then v else s ^ "." ^ v
+
+(* FIXME: this is ugly as hell *)
+let rec expr_in_scope scp e = match e with
+    | E_Plus  (e1, e2) -> E_Plus  (expr_in_scope scp e1, expr_in_scope scp e2)
+    | E_Minus (e1, e2) -> E_Minus (expr_in_scope scp e1, expr_in_scope scp e2)
+    | E_Mul   (e1, e2) -> E_Mul   (expr_in_scope scp e1, expr_in_scope scp e2)
+    | E_Variable s -> E_Variable (in_scope scp s)
+    | E_String   s -> E_String   s 
+    | E_Unbased  s -> E_Unbased  s 
+    | E_Builtin  s -> E_Builtin  s 
+    | E_Based_H (i,s) -> E_Based_H (i,s)
+    | E_Based_D (i,s) -> E_Based_D (i,s)
+    | E_Based_O (i,s) -> E_Based_O (i,s)
+    | E_Based_B (i,s) -> E_Based_B (i,s)
+    | E_Range   (e1,e2,e3) -> E_Range (expr_in_scope scp e1, 
+                                       expr_in_scope scp e2,
+                                       expr_in_scope scp e3)
+    | E_Index   (e1, e2) -> E_Index (expr_in_scope scp e1, expr_in_scope scp e2)
+    | E_Concat  (el)     -> E_Concat (lmap (expr_in_scope scp) el)
+    | E_Unary   (uop, e) -> E_Unary (uop, expr_in_scope scp e)
+    | E_EqEq    (e1, e2) -> E_EqEq   (expr_in_scope scp e1, expr_in_scope scp e2)
+    | E_BinAnd  (e1, e2) -> E_BinAnd (expr_in_scope scp e1, expr_in_scope scp e2)
+    | E_BinOr   (e1, e2) -> E_BinOr  (expr_in_scope scp e1, expr_in_scope scp e2)
+    | E_BinXor  (e1, e2) -> E_BinXor (expr_in_scope scp e1, expr_in_scope scp e2)
+
+let event_in_scope scp ev = match ev with
+    | Posedge e -> Posedge (expr_in_scope scp e)
+    | Negedge e -> Negedge (expr_in_scope scp e)
+    | Level   e -> Level   (expr_in_scope scp e)
 
 let rec eval_expr env = function
   | E_Unbased  _    as u -> fst_from_literal u
@@ -112,14 +144,14 @@ let rec eval_constexpr_int = function
    | E_Mul   (e1, e2) -> (eval_constexpr_int e1) * (eval_constexpr_int e2)
    | _ -> raise NonConstExpr
 
-let sizeof env s = match hfind env.ranges s with
+let sizeof env s = match hrange env s with
                    | Single -> 1
                    | Range (e1, e2) -> let msb = eval_constexpr_int e1 in
                                        let lsb = eval_constexpr_int e2 in
                                        if(msb >= lsb) then msb - lsb + 1
                                        else                lsb - msb + 1
 
-let norm_idx env s i = match hfind env.ranges s with
+let norm_idx env s i = match hrange env s with
                    | Single -> raise IllegalScalarIndex
                    | Range (e1,e2) -> let msb = eval_constexpr_int e1 in
                                       let lsb = eval_constexpr_int e2 in
@@ -143,11 +175,11 @@ let mk_symtable = { kinds  = Hashtbl.create 100;
                     unblk  = [];
                     time   = 0 }
 
-let populate_symtable env (Module (_,_,ents)) =
+let populate_symtable scp env (Module (_,_,ents)) =
     let decls = lfilter_map (function Decl (k,r,lst) -> Some (k,r,lst) | _ -> None) ents in
-    let add_multiple (k,r,lst) = List.iter (fun s -> hadd env.kinds  s k;
-                                                     hadd env.ranges s r;
-                                                     hadd env.values s (all_zs r);) lst in
+    let add_multiple (k,r,lst) = List.iter (fun s -> hadd env.kinds  (in_scope scp s) k;
+                                                     hadd env.ranges (in_scope scp s) r;
+                                                     hadd env.values (in_scope scp s) (all_zs r);) lst in
     List.iter (fun d -> add_multiple d) decls
 
 let rec expr_deps = function
@@ -230,17 +262,17 @@ let pop_dstk_n n pstate =
                          else iter (pop_dstk pstate::acc) (n-1) in iter [] n
 let pc_incr pstate = pstate.pc <- pstate.pc+1
 
-let rec compile_expr expr =
-   let uop     a inst = (compile_expr a) @ [inst] in
-   let binop a b inst = (compile_expr a) @
-                        (compile_expr b) @ [inst] in match expr with
+let rec compile_expr scp expr =
+   let uop     a inst = (compile_expr scp a) @ [inst] in
+   let binop a b inst = (compile_expr scp a) @
+                        (compile_expr scp b) @ [inst] in match expr with
   | E_Unbased  _    as u -> [I_Literal (fst_from_literal u)]
   | E_Based_H (_,_) as u -> [I_Literal (fst_from_literal u)]
   | E_Based_D (_,_) as u -> [I_Literal (fst_from_literal u)]
   | E_Based_O (_,_) as u -> [I_Literal (fst_from_literal u)]
   | E_Based_B (_,_) as u -> [I_Literal (fst_from_literal u)]
   | E_String s           -> [I_Literal (V_String s) ]
-  | E_Variable s         -> [I_Read s]
+  | E_Variable s         -> [I_Read (in_scope scp s)]
   | E_Plus   (a,b)       -> binop a b I_Plus
   | E_Minus  (a,b)       -> binop a b I_Minus
   | E_Mul    (a,b)       -> binop a b I_Mul
@@ -248,29 +280,33 @@ let rec compile_expr expr =
   | E_BinOr  (a,b)       -> binop a b I_BinOr
   | E_BinXor (a,b)       -> binop a b I_BinXor
   | E_EqEq   (a,b)       -> binop a b I_EqEq
-  | E_Concat lst         -> (lconcat (lmap compile_expr lst)) @ [I_Concat (List.length lst)]
+  | E_Concat lst         -> (lconcat (lmap (fun e -> compile_expr scp e) lst)) 
+                                @ [I_Concat (List.length lst)]
   | E_Unary (Uop_Inv, a) -> uop a I_UnInv
   | E_Unary (Uop_Or,  a) -> uop a I_UnOr
   | E_Unary (Uop_Xor, a) -> uop a I_UnXor
   | E_Unary (Uop_And, a) -> uop a I_UnAnd
-  | E_Index (E_Variable a, e) -> (compile_expr e) @ [I_Index a ]
+  | E_Index (E_Variable a, e) -> (compile_expr scp e) @ [I_Index (in_scope scp a) ]
   | E_Index _            -> raise (NotImplemented "Index must be variable based")
   | E_Range (E_Variable s, e1, e2) ->
                          let msb = eval_constexpr_int e1 in
-                         let lsb = eval_constexpr_int e2 in [I_Range (s,msb,lsb) ]
+                         let lsb = eval_constexpr_int e2 in [I_Range (in_scope scp s,msb,lsb) ]
   | E_Range _            -> raise (NotImplemented "Range must be variable based")
   | E_Builtin "time"     -> [I_Time]
   | E_Builtin _          -> raise (NotImplemented "Only $time is allowed in expressions")
 
 
-let rec compile_stmt = function
+let rec compile_stmt scp st = match st with
    | S_Builtin ("finish", _) -> [I_Finish]
    | S_Builtin ("time",   _) -> [I_Time]
-   | S_Builtin (s, lst) -> (List.concat (lmap compile_expr lst)) @ [I_Builtin (s,List.length lst)]
-   | S_Seq_Block lst    ->  List.concat (lmap compile_stmt lst)
-   | S_Blk_Assign (E_Variable v, ex) -> (compile_expr ex) @ [I_Resize v; I_Write v]
-   | S_Delay (d, stmt) -> [I_Delay d] @ (compile_stmt stmt)
-   | S_EvControl (el, stmt) -> [I_Event el; I_Clear (event_deps el)] @ (compile_stmt stmt)
+   | S_Builtin (s, lst) -> (lconcat (lmap (compile_expr scp) lst)) 
+                                @ [I_Builtin (s,List.length lst)]
+   | S_Seq_Block lst    ->  lconcat (lmap (compile_stmt scp) lst)
+   | S_Blk_Assign (E_Variable v, ex) -> (compile_expr scp ex) 
+                                     @ [I_Resize (in_scope scp v); I_Write (in_scope scp v)]
+   | S_Delay (d, stmt) -> [I_Delay d] @ (compile_stmt scp stmt)
+   | S_EvControl (el, stmt) -> let el_scp = lmap (event_in_scope scp) el in
+                          [I_Event el_scp; I_Clear (event_deps el_scp)] @ (compile_stmt scp stmt)
    | _ -> raise (NoEval "Unsupported stmt for compilation :(")
 
 let check_hook env var old_val (Trigger(_, edg, exp))
@@ -356,22 +392,22 @@ let run_instr env ps =
     | I_UnOr          -> uop   fst_unor
     | I_UnAnd         -> uop   fst_unand
     | I_UnXor         -> uop   fst_unxor
-    | I_Index s       -> ( match hfind env.ranges s with
+    | I_Index s       -> ( match hrange env s with
                             | Single -> raise IllegalScalarIndex
                             | Range (e1,e2) -> 
                                 let msb = eval_constexpr_int e1 in
                                 let lsb = eval_constexpr_int e2 in
-                                let v   = hfind env.values s    in
+                                let v   = hvalue env s          in
                                 let i   = pop_dstk ps           in
                                 let ret = fst_idx v msb lsb i   in
                                 push_dstk ret ps;
                                 pc_incr       ps )
-    | I_Range (s,m,l) -> ( match hfind env.ranges s with
+    | I_Range (s,m,l) -> ( match hrange env s with
                             | Single -> raise IllegalScalarIndex 
                             | Range (e1,e2) ->   
                                 let msb = eval_constexpr_int e1 in
                                 let lsb = eval_constexpr_int e2 in
-                                let v   = hfind env.values s in
+                                let v   = hvalue env s          in
                                 let ret = fst_rng v msb lsb m l in
                                 if msb >= lsb && m < l then raise ReversedRange;
                                 if msb <  lsb && m > l then raise ReversedRange;
@@ -383,27 +419,31 @@ let run_instr env ps =
     | I_Finish        -> ps.status <- Stts_Finish; raise Yield
     | I_Time          -> push_dstk (V_FourState (Sys.int_size, -1, env.time)) ps ; pc_incr ps
 
-let compile_process = function
-    | Always  s -> (compile_stmt s) @ [I_Restart]
-    | Initial s -> (compile_stmt s) @ [I_Halt]
+let compile_conn scope n_scope port expr = (* depending on input, output or inout *) 
+                                 raise (NotImplemented "Compile Conn")
+
+let compile_process scp p = match p with
+    | Always  s -> (compile_stmt scp s) @ [I_Restart]
+    | Initial s -> (compile_stmt scp s) @ [I_Halt]
     | Assign  (E_Variable v, expr) -> let deps = expr_deps expr in
-                                      let el   = lmap (fun s -> Level (E_Variable s)) deps in
-                                      (compile_expr expr) @ 
-                                      [ I_Resize v; 
-                                        I_Write  v; 
+                                      let el   = lmap (fun s -> Level (E_Variable (in_scope scp s))) deps in
+                                      (compile_expr scp expr) @ 
+                                      [ I_Resize (in_scope scp v); 
+                                        I_Write  (in_scope scp v); 
                                         I_Event el;
                                         I_Clear (event_deps el); 
                                         I_Restart ]
     | Assign _  -> raise (NotImplemented "Involved lvalues are not supported")
-    | _         -> raise NoWay
+    | Inst (m_name, i_name, _, conns) -> raise NoWay
+    | Decl _ -> raise NoWay
 
-let compile_module (Module (_, _, ents)) =
+let compile_module scope (Module (_, _, ents)) =
        let f_ents = lfilter (function
                                     | Always _ | Initial _ | Assign _ -> true
                                     | _ -> false ) ents in
        let pids = List.init (List.length f_ents) (fun f -> f+1) in
-       let prcs = lmap  compile_process f_ents                  in
-       List.map2 (fun n bc -> init_pstate n bc) pids prcs
+       let prcs = lmap (fun p -> compile_process scope p) f_ents                  in
+       List.map2 (fun pid instrs -> init_pstate pid instrs) pids prcs
 
 let run_process env ps = try while true do run_instr env ps done with Yield -> ()
 
@@ -457,8 +497,7 @@ let simulate env ps_tab =
 
 let main path = let m      = fst ( parse_module ( tokenize path ) ) in
                 let env    = mk_symtable in
-                let ps_tab = compile_module m in
-                populate_symtable env m;
-                simulate env ps_tab ;;
+                populate_symtable "feature" env m;
+                simulate env (compile_module "feature" m) ;;
 
 main Sys.argv.(1) ;;
